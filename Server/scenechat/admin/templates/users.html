@@ -1,0 +1,62 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1 class="page-title">Users</h1>
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Username</th>
+                <th>Role</th>
+                <th>Registered</th>
+                <th>Status</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for user in users %}
+            <tr>
+                <td style="color: #555;">{{ user[0] }}</td>
+                <td>{{ user[1] }}</td>
+                <td>
+                    {% if user[5] == 'admin' %}
+                        <span class="badge badge-green">Admin</span>
+                    {% elif user[5] == 'moderator' %}
+                        <span class="badge badge-purple">Mod</span>
+                    {% else %}
+                        <span class="badge badge-blue">User</span>
+                    {% endif %}
+                </td>
+                <td style="color: #555;">{{ user[2] }}</td>
+                <td>
+                    {% if user[3] %}
+                        <span class="badge badge-red">Banned</span>
+                    {% else %}
+                        <span class="badge badge-green">Active</span>
+                    {% endif %}
+                </td>
+                <td style="display: flex; gap: 6px; flex-wrap: wrap;">
+                    {% if user[3] %}
+                        <a href="{{ url_for('unban_user', user_id=user[0]) }}" class="btn btn-purple">Unban</a>
+                    {% else %}
+                        <a href="{{ url_for('ban_user', user_id=user[0]) }}" class="btn btn-gray">Ban</a>
+                    {% endif %}
+
+                    {% if session.role in ('superadmin', 'admin') %}
+                    <form method="POST" action="{{ url_for('set_role', user_id=user[0]) }}" style="display: flex; gap: 6px;">
+                        <select name="role" style="font-size: 0.8em; padding: 4px 8px;">
+                            <option value="user" {% if user[5] == 'user' %}selected{% endif %}>User</option>
+                            <option value="moderator" {% if user[5] == 'moderator' %}selected{% endif %}>Moderator</option>
+                            <option value="admin" {% if user[5] == 'admin' %}selected{% endif %}>Admin</option>
+                        </select>
+                        <button type="submit" class="btn btn-green">Set</button>
+                    </form>
+                    <a href="{{ url_for('delete_user', user_id=user[0]) }}" class="btn btn-red" onclick="return confirm('Delete this user?')">Delete</a>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

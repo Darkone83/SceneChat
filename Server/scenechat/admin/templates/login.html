@@ -1,0 +1,23 @@
+{% extends 'base.html' %}
+{% block content %}
+<div style="max-width: 400px; margin: 80px auto;">
+    <div style="text-align: center; margin-bottom: 32px;">
+        <img src="{{ url_for('static', filename='img/scenechat.png') }}" style="height: 100px;">
+        <h2 style="color: #39ff14; margin-top: 16px;">Admin Portal</h2>
+        <p style="color: #555; font-size: 0.85em;">Team Resurgent</p>
+    </div>
+    <div class="card">
+        <form method="POST">
+            <div style="margin-bottom: 16px;">
+                <label style="color: #888; font-size: 0.85em; display: block; margin-bottom: 6px;">USERNAME</label>
+                <input type="text" name="username" style="width: 100%;" required>
+            </div>
+            <div style="margin-bottom: 24px;">
+                <label style="color: #888; font-size: 0.85em; display: block; margin-bottom: 6px;">PASSWORD</label>
+                <input type="password" name="password" style="width: 100%;" required>
+            </div>
+            <button type="submit" class="btn btn-green" style="width: 100%; padding: 10px;">LOGIN</button>
+        </form>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,49 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1 class="page-title">Rooms</h1>
+<div class="card">
+    <h2 style="color: #39ff14; margin-bottom: 16px; font-size: 1em; text-transform: uppercase; letter-spacing: 1px;">Create Room</h2>
+    <form method="POST" action="{{ url_for('create_room') }}">
+        <div class="form-row">
+            <input type="text" name="name" placeholder="room-name" required>
+            <select name="type">
+                <option value="text">Text</option>
+                <option value="voice">Voice</option>
+            </select>
+            <button type="submit" class="btn btn-green">Create</button>
+        </div>
+    </form>
+</div>
+<div class="card">
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Name</th>
+                <th>Type</th>
+                <th>Created</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for room in rooms %}
+            <tr>
+                <td style="color: #555;">{{ room[0] }}</td>
+                <td>#{{ room[1] }}</td>
+                <td>
+                    {% if room[2] == 'voice' %}
+                        <span class="badge badge-purple">Voice</span>
+                    {% else %}
+                        <span class="badge badge-blue">Text</span>
+                    {% endif %}
+                </td>
+                <td style="color: #555;">{{ room[3] }}</td>
+                <td>
+                    <a href="{{ url_for('delete_room', room_id=room[0]) }}" class="btn btn-red" onclick="return confirm('Delete this room and all its messages?')">Delete</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}

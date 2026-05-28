@@ -1,0 +1,26 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1 class="page-title">Dashboard</h1>
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="value">{{ user_count }}</div>
+        <div class="label">Total Users</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ room_count }}</div>
+        <div class="label">Rooms</div>
+    </div>
+    <div class="stat-card">
+        <div class="value">{{ message_count }}</div>
+        <div class="label">Messages</div>
+    </div>
+    <div class="stat-card">
+        <div class="value" style="color: #ef4444;">{{ banned_count }}</div>
+        <div class="label">Banned Users</div>
+    </div>
+</div>
+<div class="card">
+    <h2 style="color: #39ff14; margin-bottom: 16px; font-size: 1em; text-transform: uppercase; letter-spacing: 1px;">Server Status</h2>
+    <p style="color: #888; font-size: 0.9em;">WebSocket server running on port 8943 &mdash; Admin portal on port 8950</p>
+</div>
+{% endblock %}
