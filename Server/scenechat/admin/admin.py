@@ -253,17 +253,21 @@ def users():
         db = get_db()
         cursor = db.cursor()
         cursor.execute("""
-            SELECT id, username, created_at, is_banned, token_expiry, role
+            SELECT id, username, created_at, is_banned, token_expiry, role,
+                   last_seen, last_room
             FROM users ORDER BY created_at DESC
         """)
         users = cursor.fetchall()
         return render_template('users.html', users=users)
     except Exception as e:
-        flash(f'Database error: {e}')
+        import traceback
+        flash(f'Database error: {e} -- {traceback.format_exc()}')
         return render_template('users.html', users=[])
     finally:
-        cursor.close()
-        db.close()
+        try: cursor.close()
+        except: pass
+        try: db.close()
+        except: pass
 
 @app.route('/users/ban/<int:user_id>')
 @require_moderator

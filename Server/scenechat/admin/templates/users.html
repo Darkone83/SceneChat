@@ -9,6 +9,8 @@
                 <th>Username</th>
                 <th>Role</th>
                 <th>Registered</th>
+                <th>Last Seen</th>
+                <th>Last Room</th>
                 <th>Status</th>
                 <th>Actions</th>
             </tr>
@@ -28,6 +30,20 @@
                     {% endif %}
                 </td>
                 <td style="color: #555;">{{ user[2] }}</td>
+                <td style="color: #555;">
+                    {% if user[6] %}
+                        {{ user[6].strftime('%Y-%m-%d %H:%M') }}
+                    {% else %}
+                        <span style="color:#333;">Never</span>
+                    {% endif %}
+                </td>
+                <td style="color: #555;">
+                    {% if user[7] %}
+                        Room {{ user[7] }}
+                    {% else %}
+                        <span style="color:#333;">&mdash;</span>
+                    {% endif %}
+                </td>
                 <td>
                     {% if user[3] %}
                         <span class="badge badge-red">Banned</span>

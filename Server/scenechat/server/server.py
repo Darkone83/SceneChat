@@ -63,6 +63,20 @@ _admin_queue = asyncio.Queue()
 # -- Connected clients ---------------------------------------------------------
 # user_id -> { writer, username, session_key, room, lock }
 connected_clients = {}
+muted_users       = set()   # in-memory mute list, clears on restart
+
+# -- scene_bot constants -------------------------------------------------------
+SCENE_BOT_ID       = 12
+SCENE_BOT_USERNAME = 'scene_bot'
+
+EMOJI_LIST = [
+    'smile','wink','laugh','cry','angry','sad','surprised','thinking',
+    'cool','love_face','dead','party','question','thumbs_up','thumbs_down',
+    'check','x','alert','heart','fireheart','star','skull','fire',
+    'scenechat_sc','scenechat_softmod','scenechat_fire','scenechat_modchip',
+    'scenechat_controller_chat','scenechat_ping','scenechat_lobby',
+    'scenechat_dpad','scenechat_buttons','scenechat_devbuild',
+]
 
 # -- Database ------------------------------------------------------------------
 def get_db():
@@ -382,6 +396,385 @@ async def handle_join_room(writer, lock, session_key, payload, client_id):
         cursor.close()
         db.close()
 
+
+# -- scene_bot -----------------------------------------------------------------
+
+async def bot_reply(room_id: int, text: str, target_client_id: int = None):
+    """Send a message from scene_bot. If target_client_id is set, DM only that client."""
+    ts        = datetime.now().strftime('%H:%M')
+    payload   = bytes([room_id])
+    payload  += pack_string8(SCENE_BOT_USERNAME)
+    payload  += pack_string16(text)
+    payload  += pack_string8(ts)
+
+    targets = {}
+    if target_client_id and target_client_id in connected_clients:
+        targets = {target_client_id: connected_clients[target_client_id]}
+    else:
+        targets = {uid: c for uid, c in connected_clients.items()
+                   if c['room'] == room_id}
+
+    for uid, client in targets.items():
+        try:
+            await write_encrypted(client['writer'], client['lock'],
+                                  client['session_key'], SCCP_MSG_RECV, payload)
+        except Exception:
+            pass
+
+
+async def handle_bot_command(content: str, room_id: int, client_id: int):
+    """Parse and execute a bot command. Returns True if command was handled."""
+    parts   = content.strip().split()
+    if not parts or not parts[0].startswith('/'):
+        return False
+
+    cmd  = parts[0].lower()
+    args = parts[1:]
+    username = connected_clients.get(client_id, {}).get('username', '?')
+
+    # -- Determine caller role -------------------------------------------------
+    caller_role = 'user'
+    try:
+        db     = get_db()
+        cursor = db.cursor()
+        cursor.execute("SELECT role FROM users WHERE id = %s", (client_id,))
+        row = cursor.fetchone()
+        if row:
+            caller_role = row[0]
+    except Exception:
+        pass
+    finally:
+        try: cursor.close()
+        except: pass
+        try: db.close()
+        except: pass
+
+    is_mod = caller_role in ('moderator', 'admin', 'superadmin')
+
+    # -- /help -----------------------------------------------------------------
+    if cmd == '/help':
+        sub = args[0].lower() if args else ''
+        if sub == 'emoji':
+            await bot_reply(room_id, (
+                '[scene_bot] Emoji Help:\n'
+                '  /emoji         - List all emoji tokens\n'
+                '  Use :token: in any message to render an emoji\n'
+                '  Example: Hello :smile: world :fire:'
+            ), client_id)
+        elif sub == 'rooms':
+            await bot_reply(room_id, (
+                '[scene_bot] Room Help:\n'
+                '  /rooms         - List all rooms\n'
+                '  /online        - Show connected users and their rooms'
+            ), client_id)
+        elif sub == 'mod' and is_mod:
+            await bot_reply(room_id, (
+                '[scene_bot] Moderator Commands:\n'
+                '  /kick <user>     - Disconnect a user\n'
+                '  /ban <user>      - Ban a user\n'
+                '  /unban <user>    - Unban a user\n'
+                '  /mute <user>     - Mute a user (clears on restart)\n'
+                '  /unmute <user>   - Unmute a user\n'
+                '  /announce <msg>  - Broadcast to all rooms\n'
+                '  /room list       - List rooms with IDs\n'
+                '  /room create <name> - Create a new room\n'
+                '  /room delete <id>   - Delete a room'
+            ), client_id)
+        else:
+            mod_hint = '  /help mod      - Moderator commands\n' if is_mod else ''
+            await bot_reply(room_id, (
+                '[scene_bot] SceneChat Help:\n'
+                '  /help          - This message\n'
+                '  /help emoji    - Emoji help\n'
+                '  /help rooms    - Room help\n'
+                + mod_hint +
+                '  /online        - Show connected users\n'
+                '  /rooms         - List all rooms\n'
+                '  /emoji         - List emoji tokens\n'
+                '  /me <text>     - Action message\n'
+                '  /ping          - Check server status\n'
+                '  /time          - Show server time\n'
+                '  /version       - Show server version'
+            ), client_id)
+        return True
+
+    # -- /ping -----------------------------------------------------------------
+    if cmd == '/ping':
+        await bot_reply(room_id, '[scene_bot] Pong! Server is alive.', client_id)
+        return True
+
+    # -- /time -----------------------------------------------------------------
+    if cmd == '/time':
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        await bot_reply(room_id, f'[scene_bot] Server time: {now}', client_id)
+        return True
+
+    # -- /version --------------------------------------------------------------
+    if cmd == '/version':
+        await bot_reply(room_id,
+            '[scene_bot] SceneChat Server v1.0 | Protocol SCCP | Team Resurgent / Darkone83',
+            client_id)
+        return True
+
+    # -- /online ---------------------------------------------------------------
+    if cmd == '/online':
+        lines = ['[scene_bot] Connected users:']
+        for uid, c in connected_clients.items():
+            room = c.get('room', '?')
+            lines.append(f'  {c["username"]} -> room {room}')
+        if len(lines) == 1:
+            lines.append('  Nobody else is connected.')
+        await bot_reply(room_id, '\n'.join(lines), client_id)
+        return True
+
+    # -- /rooms ----------------------------------------------------------------
+    if cmd == '/rooms':
+        try:
+            db     = get_db()
+            cursor = db.cursor()
+            cursor.execute("SELECT id, name, type FROM rooms ORDER BY type, name")
+            rows = cursor.fetchall()
+            lines = ['[scene_bot] Available rooms:']
+            for row in rows:
+                icon = '[voice]' if row[2] == 'voice' else '[text]'
+                lines.append(f'  {icon} #{row[1]} (id:{row[0]})')
+            await bot_reply(room_id, '\n'.join(lines), client_id)
+        except Exception as e:
+            await bot_reply(room_id, f'[scene_bot] Error: {e}', client_id)
+        finally:
+            try: cursor.close()
+            except: pass
+            try: db.close()
+            except: pass
+        return True
+
+    # -- /emoji ----------------------------------------------------------------
+    if cmd == '/emoji':
+        chunks = []
+        line   = '[scene_bot] Emoji tokens:\n'
+        for i, name in enumerate(EMOJI_LIST):
+            line += f'  :{name}:'
+            if (i + 1) % 4 == 0:
+                chunks.append(line)
+                line = ''
+        if line:
+            chunks.append(line)
+        await bot_reply(room_id, '\n'.join(chunks), client_id)
+        return True
+
+    # -- /me -------------------------------------------------------------------
+    if cmd == '/me':
+        if not args:
+            await bot_reply(room_id, '[scene_bot] Usage: /me <action text>', client_id)
+            return True
+        action_text = ' '.join(args)
+        # Broadcast the action as a regular message styled as emote
+        ts      = datetime.now().strftime('%H:%M')
+        payload = bytes([room_id])
+        payload += pack_string8(username)
+        payload += pack_string16(f'* {username} {action_text}')
+        payload += pack_string8(ts)
+        for uid, client in list(connected_clients.items()):
+            if client['room'] == room_id:
+                try:
+                    await write_encrypted(client['writer'], client['lock'],
+                                          client['session_key'], SCCP_MSG_RECV, payload)
+                except Exception:
+                    pass
+        # Also save to DB
+        try:
+            db     = get_db()
+            cursor = db.cursor()
+            cursor.execute(
+                "INSERT INTO messages (room_id, user_id, content) VALUES (%s, %s, %s)",
+                (room_id, client_id, f'* {username} {action_text}')
+            )
+            db.commit()
+        except Exception:
+            pass
+        finally:
+            try: cursor.close()
+            except: pass
+            try: db.close()
+            except: pass
+        return True
+
+    # -- Moderator commands ----------------------------------------------------
+    if not is_mod:
+        if cmd in ('/kick','/ban','/unban','/mute','/unmute','/announce','/room'):
+            await bot_reply(room_id,
+                '[scene_bot] Permission denied. Moderator access required.', client_id)
+            return True
+        return False  # unknown command, let it pass through as normal message
+
+    # -- /kick -----------------------------------------------------------------
+    if cmd == '/kick':
+        if not args:
+            await bot_reply(room_id, '[scene_bot] Usage: /kick <username>', client_id)
+            return True
+        target_name = args[0]
+        target_id   = next((uid for uid, c in connected_clients.items()
+                            if c['username'].lower() == target_name.lower()), None)
+        if not target_id:
+            await bot_reply(room_id, f'[scene_bot] User {target_name} not found online.', client_id)
+            return True
+        await bot_reply(room_id,
+            f'[scene_bot] {target_name} has been kicked by {username}.', None)
+        try:
+            connected_clients[target_id]['writer'].close()
+        except Exception:
+            pass
+        log.info(f'BOT: {username} kicked {target_name}')
+        return True
+
+    # -- /ban ------------------------------------------------------------------
+    if cmd == '/ban':
+        if not args:
+            await bot_reply(room_id, '[scene_bot] Usage: /ban <username>', client_id)
+            return True
+        target_name = args[0]
+        try:
+            db     = get_db()
+            cursor = db.cursor()
+            cursor.execute("UPDATE users SET is_banned = 1 WHERE username = %s", (target_name,))
+            db.commit()
+            affected = cursor.rowcount
+            if affected:
+                await bot_reply(room_id,
+                    f'[scene_bot] {target_name} has been banned by {username}.', None)
+                # Kick if online
+                target_id = next((uid for uid, c in connected_clients.items()
+                                  if c['username'].lower() == target_name.lower()), None)
+                if target_id:
+                    try: connected_clients[target_id]['writer'].close()
+                    except Exception: pass
+            else:
+                await bot_reply(room_id, f'[scene_bot] User {target_name} not found.', client_id)
+        except Exception as e:
+            await bot_reply(room_id, f'[scene_bot] Error: {e}', client_id)
+        finally:
+            try: cursor.close()
+            except: pass
+            try: db.close()
+            except: pass
+        log.info(f'BOT: {username} banned {target_name}')
+        return True
+
+    # -- /unban ----------------------------------------------------------------
+    if cmd == '/unban':
+        if not args:
+            await bot_reply(room_id, '[scene_bot] Usage: /unban <username>', client_id)
+            return True
+        target_name = args[0]
+        try:
+            db     = get_db()
+            cursor = db.cursor()
+            cursor.execute("UPDATE users SET is_banned = 0 WHERE username = %s", (target_name,))
+            db.commit()
+            if cursor.rowcount:
+                await bot_reply(room_id,
+                    f'[scene_bot] {target_name} has been unbanned by {username}.', client_id)
+            else:
+                await bot_reply(room_id, f'[scene_bot] User {target_name} not found.', client_id)
+        except Exception as e:
+            await bot_reply(room_id, f'[scene_bot] Error: {e}', client_id)
+        finally:
+            try: cursor.close()
+            except: pass
+            try: db.close()
+            except: pass
+        return True
+
+    # -- /mute -----------------------------------------------------------------
+    if cmd == '/mute':
+        if not args:
+            await bot_reply(room_id, '[scene_bot] Usage: /mute <username>', client_id)
+            return True
+        target_name = args[0].lower()
+        muted_users.add(target_name)
+        await bot_reply(room_id,
+            f'[scene_bot] {args[0]} has been muted by {username}.', None)
+        log.info(f'BOT: {username} muted {target_name}')
+        return True
+
+    # -- /unmute ---------------------------------------------------------------
+    if cmd == '/unmute':
+        if not args:
+            await bot_reply(room_id, '[scene_bot] Usage: /unmute <username>', client_id)
+            return True
+        target_name = args[0].lower()
+        muted_users.discard(target_name)
+        await bot_reply(room_id,
+            f'[scene_bot] {args[0]} has been unmuted by {username}.', None)
+        return True
+
+    # -- /announce -------------------------------------------------------------
+    if cmd == '/announce':
+        if not args:
+            await bot_reply(room_id, '[scene_bot] Usage: /announce <message>', client_id)
+            return True
+        msg = ' '.join(args)
+        ts  = datetime.now().strftime('%H:%M')
+        for uid, client in list(connected_clients.items()):
+            r   = client.get('room', room_id)
+            pkt = bytes([r]) + pack_string8(SCENE_BOT_USERNAME) + pack_string16(f'[ANNOUNCE] {msg}') + pack_string8(ts)
+            try:
+                await write_encrypted(client['writer'], client['lock'],
+                                      client['session_key'], SCCP_MSG_RECV, pkt)
+            except Exception:
+                pass
+        log.info(f'BOT: {username} announced: {msg}')
+        return True
+
+    # -- /room -----------------------------------------------------------------
+    if cmd == '/room':
+        sub = args[0].lower() if args else ''
+        if sub == 'list':
+            return await handle_bot_command('/rooms', room_id, client_id)
+        elif sub == 'create' and len(args) >= 2:
+            room_name = ' '.join(args[1:])
+            try:
+                db     = get_db()
+                cursor = db.cursor()
+                cursor.execute(
+                    "INSERT INTO rooms (name, type) VALUES (%s, 'text')", (room_name,))
+                db.commit()
+                await bot_reply(room_id,
+                    f'[scene_bot] Room #{room_name} created.', client_id)
+            except Exception as e:
+                await bot_reply(room_id, f'[scene_bot] Error: {e}', client_id)
+            finally:
+                try: cursor.close()
+                except: pass
+                try: db.close()
+                except: pass
+        elif sub == 'delete' and len(args) >= 2:
+            try:
+                rid = int(args[1])
+                db     = get_db()
+                cursor = db.cursor()
+                cursor.execute("DELETE FROM rooms WHERE id = %s", (rid,))
+                db.commit()
+                await bot_reply(room_id,
+                    f'[scene_bot] Room {rid} deleted.', client_id)
+            except Exception as e:
+                await bot_reply(room_id, f'[scene_bot] Error: {e}', client_id)
+            finally:
+                try: cursor.close()
+                except: pass
+                try: db.close()
+                except: pass
+        else:
+            await bot_reply(room_id,
+                '[scene_bot] Usage: /room list | /room create <name> | /room delete <id>',
+                client_id)
+        return True
+
+    # Unknown command
+    await bot_reply(room_id,
+        f'[scene_bot] Unknown command: {cmd}. Type /help for a list.', client_id)
+    return True
+
 async def handle_message(writer, lock, session_key, payload, client_id):
     if not client_id or client_id not in connected_clients:
         await send_error(writer, lock, session_key, 'Not authenticated')
@@ -394,6 +787,17 @@ async def handle_message(writer, lock, session_key, payload, client_id):
 
     if not content or len(content) > 500:
         await send_error(writer, lock, session_key, 'Invalid message')
+        return
+
+    # Check mute
+    sender_name = connected_clients.get(client_id, {}).get('username', '').lower()
+    if sender_name in muted_users:
+        await bot_reply(room_id, '[scene_bot] You are muted.', client_id)
+        return
+
+    # Intercept bot commands
+    if content.startswith('/'):
+        await handle_bot_command(content, room_id, client_id)
         return
 
     try:
@@ -495,6 +899,23 @@ async def handle_client(reader, writer):
         log.error(f"Client error {addr}: {e}", exc_info=True)
     finally:
         if client_id and client_id in connected_clients:
+            # Persist last_seen and last_room before removing client
+            try:
+                last_room = connected_clients[client_id].get('room')
+                db     = get_db()
+                cursor = db.cursor()
+                cursor.execute(
+                    "UPDATE users SET last_seen = NOW(), last_room = %s WHERE id = %s",
+                    (last_room, client_id)
+                )
+                db.commit()
+            except Exception as _pe:
+                log.warning(f"Could not update last_seen for {client_id}: {_pe}")
+            finally:
+                try: cursor.close()
+                except: pass
+                try: db.close()
+                except: pass
             del connected_clients[client_id]
         log.info(f"Disconnected: {addr}")
         writer.close()
