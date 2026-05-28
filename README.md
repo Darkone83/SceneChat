@@ -122,9 +122,7 @@ SceneChat/
 │       ├── monitor.html
 │       ├── users.html
 │       └── rooms.html
-│
-└── tools/
-    └── gen_emoji.py         # Emoji PNG → BGRA atlas header generator
+
 ```
 
 ---
