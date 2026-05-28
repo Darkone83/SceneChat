@@ -183,13 +183,12 @@ void Auth_Shutdown(void) {
 }
 
 void Auth_InitLogout(IDirect3DDevice8* pDevice, const char* server_ip) {
-    /* Called when returning from chat -- show login form without
-       auto-connecting or auto-logging in. Pre-fill username from
-       saved creds so the user only needs to press Start to quit
-       via Back, or re-type password to get back in. */
+    /* Called when returning from chat. Gracefully closes the old session,
+       reinitialises the network stack, and starts a fresh TCP + DH
+       handshake -- same path as Auth_Init but without auto-login.
+       Without SC_Net_Init + ConnectBegin the socket is dead and the
+       login form has nowhere to send credentials. */
     (void)pDevice;
-    (void)server_ip;
-    s_state = ST_LOGIN;
     s_is_register = 0;
     s_active_field = 0;
     s_field_count = FIELD_COUNT_LOGIN;
@@ -205,6 +204,12 @@ void Auth_InitLogout(IDirect3DDevice8* pDevice, const char* server_ip) {
     /* Keep username pre-filled from saved creds if present */
     s_user[0] = 0;
     if (Creds_Load()) lstrcpynA(s_user, Creds_GetUsername(), sizeof(s_user));
+
+    /* Gracefully close old session, then reinit stack for fresh handshake */
+    SC_Net_Disconnect();
+    SC_Net_Init();
+    SC_Net_ConnectBegin(server_ip);
+    s_state = ST_CONNECTING;   /* wait for handshake, then show login form */
 
     HID_Init();
 }

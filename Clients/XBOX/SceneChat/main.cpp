@@ -214,7 +214,6 @@ void __cdecl main(void) {
             if (chat_result == -1) {
                 /* Logged out -- back to auth */
                 Chat_Shutdown();
-                SC_Net_Disconnect();
                 Auth_InitLogout(g_pDevice, SCENECHAT_SERVER_IP);
                 s_state = STATE_AUTH;
             }
