@@ -1,5 +1,6 @@
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 
@@ -19,31 +20,28 @@ public partial class EmojiPickerWindow : Window
         "scenechat_dpad","scenechat_buttons","scenechat_devbuild",
     };
 
-    private const int CellSize = 32;
-    private const int PerRow = 8;
-    private const int RenderSize = 24;
+    private static readonly Dictionary<string, BitmapImage> _cache = new();
 
-    // Shared atlas -- loaded once
-    private static BitmapSource? _atlas;
-
-    private static BitmapSource GetAtlas()
+    public static BitmapImage? GetEmojiImage(string name)
     {
-        if (_atlas != null) return _atlas;
-        var uri = new Uri("pack://application:,,,/Resources/emoji_atlas.png");
-        var bmp = new BitmapImage(uri);
+        if (_cache.TryGetValue(name, out var cached)) return cached;
+
+        var path = System.IO.Path.Combine(
+            AppDomain.CurrentDomain.BaseDirectory,
+            "Resources", "emoji", $"{name}.png");
+
+        if (!System.IO.File.Exists(path)) return null;
+
+        var bmp = new BitmapImage(new Uri(path, UriKind.Absolute));
         bmp.Freeze();
-        _atlas = bmp;
-        return _atlas;
+        _cache[name] = bmp;
+        return bmp;
     }
 
-    public static CroppedBitmap GetEmojiSlice(int index)
+    public static ImageSource? GetEmojiSlice(int index)
     {
-        int col = index % PerRow;
-        int row = index / PerRow;
-        var rect = new Int32Rect(col * CellSize, row * CellSize, CellSize, CellSize);
-        var crop = new CroppedBitmap(GetAtlas(), rect);
-        crop.Freeze();
-        return crop;
+        if (index < 0 || index >= EmojiNames.Length) return null;
+        return GetEmojiImage(EmojiNames[index]);
     }
 
     public EmojiPickerWindow()
@@ -54,33 +52,49 @@ public partial class EmojiPickerWindow : Window
 
     private void BuildGrid()
     {
-        for (int i = 0; i < EmojiNames.Length; i++)
-        {
-            var name = EmojiNames[i];
-            var idx = i;
+        var normal = new SolidColorBrush(Color.FromRgb(0x1A, 0x1A, 0x1A));
+        var hover = new SolidColorBrush(Color.FromRgb(0x39, 0xFF, 0x14));
+        var border = new SolidColorBrush(Color.FromRgb(0x33, 0x33, 0x33));
 
-            var img = new Image
+        foreach (var name in EmojiNames)
+        {
+            var img = GetEmojiImage(name);
+            var token = $":{name}:";
+
+            // Use Border + Image directly -- avoids WPF Button ControlTemplate
+            // foreground/opacity inheritance that was tinting the image black
+            var image = new Image
             {
-                Source = GetEmojiSlice(i),
-                Width = RenderSize,
-                Height = RenderSize
+                Width = 24,
+                Height = 24,
+                Stretch = Stretch.Uniform,
+                Source = img
             };
 
-            var btn = new Button
+            var cell = new Border
             {
-                Content = img,
                 Width = 36,
                 Height = 36,
                 Margin = new Thickness(2),
-                Background = new SolidColorBrush(Color.FromRgb(0x1A, 0x1A, 0x1A)),
+                Background = normal,
                 BorderThickness = new Thickness(1),
-                BorderBrush = new SolidColorBrush(Color.FromRgb(0x33, 0x33, 0x33)),
-                ToolTip = $":{name}:",
-                Tag = $":{name}:"
+                BorderBrush = border,
+                CornerRadius = new CornerRadius(4),
+                Child = image,
+                Cursor = Cursors.Hand,
+                ToolTip = token
             };
 
-            btn.Click += (_, _) => { EmojiSelected?.Invoke((string)btn.Tag); Close(); };
-            EmojiPanel.Children.Add(btn);
+            var capToken = token;
+            cell.MouseEnter += (_, _) => cell.BorderBrush = hover;
+            cell.MouseLeave += (_, _) => cell.BorderBrush = border;
+            cell.MouseLeftButtonUp += (_, _) =>
+            {
+                EmojiSelected?.Invoke(capToken);
+                Close();
+            };
+
+            EmojiPanel.Children.Add(cell);
         }
     }
 }
