@@ -1,5 +1,17 @@
 # SceneChat
 
+<div align=center>
+
+<img src="https://github.com/Darkone83/SceneChat/blob/main/img/Chat.png" width=400> <img src="https://github.com/Darkone83/SceneChat/blob/main/img/scenechat.png" width=400>
+
+</div>
+
+<div align=center>
+
+<img src="https://github.com/Darkone83/SceneChat/blob/main/img/Darkone83.png">
+
+</div>
+
 **A private encrypted chat client for the original Xbox, built by Team Resurgent / Darkone83.**
 
 SceneChat is a from-scratch homebrew chat application for the original Microsoft Xbox (2001). It implements a custom encrypted network protocol, real-time multi-room messaging, USB keyboard support, inline emoji rendering, and a web-based admin panel — all running natively on Xbox hardware via the RXDK SDK.
