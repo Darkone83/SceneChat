@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<OutputType>WinExe</OutputType>
+		<TargetFramework>net8.0-windows</TargetFramework>
+		<UseWPF>true</UseWPF>
+		<AssemblyName>SceneChat</AssemblyName>
+		<RootNamespace>SceneChatWPF</RootNamespace>
+		<ApplicationIcon>Resources\scenechat.ico</ApplicationIcon>
+		<Nullable>enable</Nullable>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+		<PublishSingleFile>true</PublishSingleFile>
+		<SelfContained>true</SelfContained>
+		<RuntimeIdentifier>win-x64</RuntimeIdentifier>
+	</PropertyGroup>
+	<ItemGroup>
+		<Resource Include="Resources\scenechat_logo.png" />
+		<Resource Include="Resources\emoji_atlas.png" />
+		<Resource Include="Resources\scenechat.ico" />
+	</ItemGroup>
+</Project>
