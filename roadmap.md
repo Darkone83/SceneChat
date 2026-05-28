@@ -272,6 +272,37 @@ Currently when an admin soft-deletes a message from the monitor, the change only
 
 ---
 
+## Helper Bot
+
+A server-side bot that responds to commands typed in chat rooms. Appears as a special user in the room and responds to trigger commands with useful information.
+
+**Planned commands:**
+- `/help` — list all available commands
+- `/emoji` — list all emoji tokens with names
+- `/rooms` — list all available rooms
+- `/online` — show currently connected users
+- `/me <text>` — action/emote message (e.g. `/me waves hello`)
+- `/version` — show server and protocol version
+
+**Architecture:**
+- Bot runs as a reserved user in the database (`Bot` username, role `admin`)
+- Server intercepts messages beginning with `/` before broadcast
+- Matching commands trigger a `MSG_RECV` response from the Bot user
+- Non-matching commands pass through as normal messages
+- Bot responses are highlighted differently in the client (distinct colour)
+
+**Client side:**
+- No client changes required — bot messages arrive as normal `MSG_RECV` packets
+- Bot username colour distinguished in the message feed (suggested: cyan `#00FFFF`)
+
+**Admin panel:**
+- Bot enable/disable toggle per room
+- Command log viewable in the monitor
+
+**DB changes:** none — bot uses the existing reserved `Bot` user row
+
+---
+
 ## Admin Panel
 
 ### Online Users Panel
