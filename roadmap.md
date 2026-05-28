@@ -54,26 +54,6 @@ Display a live list of users currently connected to the server. Required before 
 
 ---
 
-## Windows Client
-
-A native Windows desktop client that connects to the same SceneChat server using the identical SCCP protocol. Allows PC users to participate alongside Xbox users in the same rooms.
-
-**Scope:**
-- C++ Win32 or C# WPF application
-- Identical DH + ChaCha20-Poly1305 handshake (share crypto code or re-implement)
-- Full room list, message history, real-time receive
-- USB keyboard as primary input (no OSK needed)
-- Emoji rendering inline with text (GDI+ or Direct2D)
-- System tray support with unread message notifications
-- Auto-login via saved credentials (same `creds.dat` format or Windows credential store)
-
-**Shared infrastructure:**
-- Same server, same database, same protocol — no server changes required for basic text chat
-- User list presence will show Windows users alongside Xbox users
-- Admin panel sees Windows client messages identically to Xbox messages
-
----
-
 ## Chat Features
 
 ### Online Presence Carried to Client
