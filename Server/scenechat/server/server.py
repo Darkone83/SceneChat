@@ -455,12 +455,17 @@ async def handle_bot_command(content: str, room_id: int, client_id: int):
     if cmd == '/help':
         sub = args[0].lower() if args else ''
         if sub == 'emoji':
-            await bot_reply(room_id, (
-                '[scene_bot] Emoji Help:\n'
-                '  /emoji         - List all emoji tokens\n'
-                '  Use :token: in any message to render an emoji\n'
-                '  Example: Hello :smile: world :fire:'
-            ), client_id)
+            lines = ['[scene_bot] Available emoji -- use :token: in any message:']
+            row = []
+            for name in EMOJI_LIST:
+                row.append(f'{name}')
+                if len(row) == 3:
+                    lines.append('  ' + '   '.join(row))
+                    row = []
+            if row:
+                lines.append('  ' + '   '.join(row))
+            lines.append('Example: Hello :smile: world :fire:')
+            await bot_reply(room_id, '\n'.join(lines), client_id)
         elif sub == 'rooms':
             await bot_reply(room_id, (
                 '[scene_bot] Room Help:\n'
@@ -551,9 +556,9 @@ async def handle_bot_command(content: str, room_id: int, client_id: int):
     # -- /emoji ----------------------------------------------------------------
     if cmd == '/emoji':
         chunks = []
-        line   = '[scene_bot] Emoji tokens:\n'
+        line   = '[scene_bot] Emoji tokens -- wrap name with : to use e.g. :smile:\n'
         for i, name in enumerate(EMOJI_LIST):
-            line += f'  :{name}:'
+            line += f'  {name}'
             if (i + 1) % 4 == 0:
                 chunks.append(line)
                 line = ''
