@@ -665,11 +665,16 @@ class MainWindow(QMainWindow):
 
     @Slot(int, str, str)
     def _on_auth_ok(self, user_id: int, username: str, token: str):
+        # Registration success -- user_id=0, username='' 
+        if user_id == 0 and not username:
+            self._login_widget.set_busy(False)
+            self._login_widget.set_status('Registered! Please log in.', error=False)
+            self.status_bar.showMessage('Registered — please log in')
+            return
         display = username if username else self._username
         self._chat_widget.set_user(display)
         save_creds(self._server, self._username, self._password)
         EMOJI_CACHE.mkdir(exist_ok=True)
-        # Download emoji in background
         QTimer.singleShot(500, lambda: _ensure_emoji_cache(self._server))
         self._show_chat()
         self.status_bar.showMessage(f'Logged in as {display}')

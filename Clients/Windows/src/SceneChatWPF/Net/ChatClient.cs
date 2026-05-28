@@ -36,6 +36,7 @@ public class ChatClient : IAsyncDisposable
     private NetworkStream? _stream;
     private byte[]? _sessionKey;
     private CancellationTokenSource _cts = new();
+    private bool _pendingRegister = false;
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private const int PingIntervalMs = 30_000;
 
@@ -313,13 +314,22 @@ public class ChatClient : IAsyncDisposable
 
     private void HandleAuthOk(byte[] payload)
     {
+        // Use the flag set by SendRegisterAsync/SendLoginAsync to distinguish
+        // registration response [0x00][string8] from login response [user_id 4B][token][username]
+        // Checking payload[0]==0x00 is unreliable -- login user_id bytes start with 0x00 too
+        if (_pendingRegister)
+        {
+            _pendingRegister = false;
+            OnAuthOk?.Invoke(0, "", "");
+            return;
+        }
+
         if (payload.Length < 5) { OnAuthOk?.Invoke(0, "", ""); return; }
         int pos = 0;
         int userId = (int)BinaryPrimitives.ReadUInt32BigEndian(payload.AsSpan(pos)); pos += 4;
         var (token, p2) = ScProtocol.UnpackString8(payload, pos); pos = p2;
         var (username, _) = ScProtocol.UnpackString8(payload, pos);
         OnAuthOk?.Invoke(userId, username, token);
-        // Request room list immediately
         _ = RequestRoomListAsync();
     }
 
@@ -376,13 +386,19 @@ public class ChatClient : IAsyncDisposable
 
     // ── Public send methods ───────────────────────────────────────────────────
 
-    public Task SendLoginAsync(string username, string password)
-        => WriteEncryptedAsync(ScProtocol.LOGIN,
+    public async Task SendLoginAsync(string username, string password)
+    {
+        _pendingRegister = false;
+        await WriteEncryptedAsync(ScProtocol.LOGIN,
             ScProtocol.Combine(ScProtocol.PackString8(username), ScProtocol.PackString8(password)));
+    }
 
-    public Task SendRegisterAsync(string username, string password)
-        => WriteEncryptedAsync(ScProtocol.REGISTER,
+    public async Task SendRegisterAsync(string username, string password)
+    {
+        _pendingRegister = true;
+        await WriteEncryptedAsync(ScProtocol.REGISTER,
             ScProtocol.Combine(ScProtocol.PackString8(username), ScProtocol.PackString8(password)));
+    }
 
     public Task JoinRoomAsync(int roomId)
         => WriteEncryptedAsync(ScProtocol.JOIN_ROOM, [(byte)roomId]);

@@ -1,0 +1,105 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1 class="page-title">Server Log</h1>
+
+<div class="card" style="padding:0;">
+    <!-- Controls -->
+    <div style="display:flex; gap:8px; padding:12px 16px; border-bottom:1px solid #222; align-items:center; flex-wrap:wrap;">
+        <input id="filter-input" type="text" placeholder="Filter (INFO, ERROR, username...)"
+               style="flex:1; min-width:200px;"
+               oninput="applyFilter()">
+        <select id="lines-select" onchange="fetchLogs()"
+                style="background:#1a1a1a; border:1px solid #333; color:#eee;
+                       padding:7px 10px; border-radius:4px; font-size:0.85em;">
+            <option value="100">Last 100 lines</option>
+            <option value="200" selected>Last 200 lines</option>
+            <option value="500">Last 500 lines</option>
+            <option value="1000">Last 1000 lines</option>
+        </select>
+        <label style="color:#555; font-size:0.85em; display:flex; align-items:center; gap:6px; cursor:pointer;">
+            <input type="checkbox" id="auto-refresh" checked onchange="toggleAutoRefresh()">
+            Auto-refresh
+        </label>
+        <button onclick="fetchLogs()"
+                style="background:#39ff14; border:none; color:#000; font-weight:bold;
+                       padding:7px 14px; border-radius:4px; cursor:pointer; font-size:0.85em;">
+            Refresh
+        </button>
+    </div>
+
+    <!-- Log feed -->
+    <div id="log-feed" style="
+        height:600px;
+        overflow-y:auto;
+        padding:12px 16px;
+        font-family:monospace;
+        font-size:0.82em;
+        line-height:1.6;
+    "></div>
+</div>
+
+<style>
+    .log-info    { color: #aaa; }
+    .log-warning { color: #f59e0b; }
+    .log-error   { color: #ef4444; }
+    .log-debug   { color: #444; }
+</style>
+
+<script>
+    let allLines    = [];
+    let refreshTimer = null;
+
+    function classify(line) {
+        const l = line.toLowerCase();
+        if (l.includes(' error'))   return 'log-error';
+        if (l.includes(' warning')) return 'log-warning';
+        if (l.includes(' debug'))   return 'log-debug';
+        return 'log-info';
+    }
+
+    function escapeHtml(s) {
+        const d = document.createElement('div');
+        d.appendChild(document.createTextNode(s));
+        return d.innerHTML;
+    }
+
+    function applyFilter() {
+        const filter = document.getElementById('filter-input').value.toLowerCase();
+        const feed   = document.getElementById('log-feed');
+        feed.innerHTML = '';
+        const filtered = filter ? allLines.filter(l => l.toLowerCase().includes(filter)) : allLines;
+        filtered.forEach(line => {
+            const div = document.createElement('div');
+            div.className = classify(line);
+            div.textContent = line;
+            feed.appendChild(div);
+        });
+    }
+
+    async function fetchLogs() {
+        const lines  = document.getElementById('lines-select').value;
+        try {
+            const res  = await fetch(`/api/logs?lines=${lines}`);
+            const data = await res.json();
+            allLines = data.lines || [];
+            applyFilter();
+        } catch(e) {
+            console.error('Log fetch error:', e);
+        }
+    }
+
+    function toggleAutoRefresh() {
+        const checked = document.getElementById('auto-refresh').checked;
+        if (checked) {
+            refreshTimer = setInterval(fetchLogs, 3000);
+        } else {
+            clearInterval(refreshTimer);
+            refreshTimer = null;
+        }
+    }
+
+    // Initial load + start auto-refresh
+    fetchLogs();
+    refreshTimer = setInterval(fetchLogs, 3000);
+</script>
+{% endblock %}

@@ -109,6 +109,15 @@ public partial class MainWindow : Window
 
         _client.OnAuthOk += (userId, uname, token) => Dispatcher.Invoke(() =>
         {
+            if (_doRegister && userId == 0)
+            {
+                _doRegister = false;
+                BtnLogin.IsEnabled = true;
+                BtnRegister.IsEnabled = true;
+                SetLoginStatus("Registered! Please log in.", error: false);
+                SetStatus("Registered — please log in");
+                return;
+            }
             var display = string.IsNullOrEmpty(uname) ? username : uname;
             TxtLoggedInUser.Text = display;
             Creds.Save(server, username, password);

@@ -1,26 +1,48 @@
 {% extends 'base.html' %}
 {% block content %}
 <h1 class="page-title">Dashboard</h1>
+
 <div class="stats-grid">
     <div class="stat-card">
-        <div class="value">{{ user_count }}</div>
+        <div class="value" id="stat-users">{{ user_count }}</div>
         <div class="label">Total Users</div>
     </div>
     <div class="stat-card">
-        <div class="value">{{ room_count }}</div>
+        <div class="value" id="stat-rooms">{{ room_count }}</div>
         <div class="label">Rooms</div>
     </div>
     <div class="stat-card">
-        <div class="value">{{ message_count }}</div>
+        <div class="value" id="stat-messages">{{ message_count }}</div>
         <div class="label">Messages</div>
     </div>
     <div class="stat-card">
-        <div class="value" style="color: #ef4444;">{{ banned_count }}</div>
+        <div class="value" id="stat-banned" style="color:#ef4444;">{{ banned_count }}</div>
         <div class="label">Banned Users</div>
     </div>
 </div>
+
 <div class="card">
-    <h2 style="color: #39ff14; margin-bottom: 16px; font-size: 1em; text-transform: uppercase; letter-spacing: 1px;">Server Status</h2>
-    <p style="color: #888; font-size: 0.9em;">WebSocket server running on port 8943 &mdash; Admin portal on port 8950</p>
+    <h2 style="color:#39ff14; margin-bottom:16px; font-size:1em; text-transform:uppercase; letter-spacing:1px;">Server Status</h2>
+    <div style="display:flex; gap:32px; align-items:center; flex-wrap:wrap;">
+        <p style="color:#888; font-size:0.9em;">Chat server port 8943 &mdash; Admin portal port 8950</p>
+        <span id="refresh-indicator" style="color:#555; font-size:0.8em;"></span>
+    </div>
 </div>
+
+<script>
+    async function refreshStats() {
+        try {
+            const res  = await fetch('/api/dashboard_stats');
+            const data = await res.json();
+            document.getElementById('stat-users').textContent    = data.user_count;
+            document.getElementById('stat-rooms').textContent    = data.room_count;
+            document.getElementById('stat-messages').textContent = data.message_count;
+            document.getElementById('stat-banned').textContent   = data.banned_count;
+            const now = new Date();
+            document.getElementById('refresh-indicator').textContent =
+                `Last updated: ${now.toLocaleTimeString()}`;
+        } catch(e) {}
+    }
+    setInterval(refreshStats, 5000);
+</script>
 {% endblock %}

@@ -391,5 +391,62 @@ def delete_room(room_id):
         db.close()
     return redirect(url_for('rooms'))
 
+# ---------------------------------------------------------------------------
+#  Dashboard stats API (for auto-refresh)
+# ---------------------------------------------------------------------------
+@app.route('/api/dashboard_stats')
+@require_moderator
+def api_dashboard_stats():
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute("SELECT COUNT(*) FROM users")
+        user_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM rooms")
+        room_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM messages WHERE is_deleted = 0")
+        message_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM users WHERE is_banned = 1")
+        banned_count = cursor.fetchone()[0]
+        return jsonify({
+            'user_count':    user_count,
+            'room_count':    room_count,
+            'message_count': message_count,
+            'banned_count':  banned_count
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)})
+    finally:
+        cursor.close()
+        db.close()
+
+# ---------------------------------------------------------------------------
+#  Log viewer
+# ---------------------------------------------------------------------------
+LOG_PATH = '/opt/scenechat/logs/scenechat.log'
+
+@app.route('/logs')
+@require_moderator
+def logs():
+    return render_template('logs.html')
+
+@app.route('/api/logs')
+@require_moderator
+def api_logs():
+    lines  = request.args.get('lines', 200, type=int)
+    filter_ = request.args.get('filter', '').strip().lower()
+    try:
+        with open(LOG_PATH, 'r') as f:
+            all_lines = f.readlines()
+        # Most recent first
+        all_lines = all_lines[-lines:]
+        if filter_:
+            all_lines = [l for l in all_lines if filter_ in l.lower()]
+        return jsonify({'lines': [l.rstrip() for l in reversed(all_lines)]})
+    except FileNotFoundError:
+        return jsonify({'lines': ['Log file not found: ' + LOG_PATH]})
+    except Exception as e:
+        return jsonify({'lines': [f'Error reading log: {e}']})
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8950, debug=False)
