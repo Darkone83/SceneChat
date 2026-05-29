@@ -650,14 +650,21 @@ def purge_inactive_users():
     try:
         db     = get_db()
         cursor = db.cursor()
+        # Find users to purge first
         cursor.execute("""
-            DELETE FROM users
+            SELECT id FROM users
             WHERE role = 'user'
             AND (last_seen IS NULL OR last_seen < NOW() - INTERVAL %s DAY)
             AND username != 'scene_bot'
         """, (days,))
-        db.commit()
-        flash(f'Purged {cursor.rowcount} inactive users (>{days} days)')
+        user_ids = [row[0] for row in cursor.fetchall()]
+        if user_ids:
+            fmt = ','.join(['%s'] * len(user_ids))
+            # Delete messages first to satisfy FK constraint
+            cursor.execute(f"DELETE FROM messages WHERE user_id IN ({fmt})", user_ids)
+            cursor.execute(f"DELETE FROM users WHERE id IN ({fmt})", user_ids)
+            db.commit()
+        flash(f'Purged {len(user_ids)} inactive users (>{days} days)')
     except Exception as e:
         flash(f'Error: {e}')
     finally:
