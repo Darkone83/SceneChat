@@ -6,104 +6,96 @@
 
 ## Table of Contents
 
-1. [Xbox Client](#xbox-client)
-2. [Chat Features](#chat-features)
-3. [Access Control](#access-control)
-4. [Messaging](#messaging)
-5. [Admin Panel](#admin-panel)
+1. [v1.2 — Next Release](#v12--next-release)
+2. [v1.3 — Future](#v13--future)
+3. [Schema Changelog](#schema-changelog)
 
 ---
 
-## Xbox Client
+## v1.2 — Next Release
 
-### App Icon and Title ID
-Assign a proper Xbox Title ID and XBE icon to SceneChat so it appears correctly on the dashboard and in launchers.
+### Protocol Additions
 
-- Register a homebrew Title ID in the community-maintained range
-- Create a 128x128 icon and a 64x32 title image in the Xbox XBE format
-- Embed both in the XBE header using standard RXDK tooling
-- Dashboard description string: "SceneChat — Private encrypted Xbox chat"
-
----
-
-### User List Panel
-Display a live list of users currently connected to the server. Required before DMs can be initiated from the Xbox client.
-
-**Client side:**
-- New sidebar panel replacing or extending the room list
-- Toggle between room list and user list via controller (e.g. L/R bumper or Y button)
-- User entries show username and current room
-- Selecting a user opens a context menu: View Profile / Send DM
-
-**Protocol:**
-- `SCCP_USER_LIST` (0x11) — server sends full online user list on login
-- `SCCP_USER_JOIN` (0x12) — broadcast when a user connects
-- `SCCP_USER_LEAVE` (0x13) — broadcast when a user disconnects
-
-**Server side:**
-- `connected_clients` already tracks connected users — needs to broadcast presence events on connect/disconnect
-
-**DB changes:** none
-
----
-
-## Chat Features
-
-### Online Presence Carried to Client
-Server knows who is connected but clients have no visibility. Presence should flow in real time.
-
-**Implementation:**
-- On login: server sends `SCCP_USER_LIST` with all currently connected users
-- On connect: server broadcasts `SCCP_USER_JOIN` to all connected clients
-- On disconnect: server broadcasts `SCCP_USER_LEAVE` to all connected clients
-- Client maintains an in-memory online user table
-
----
-
-## Access Control
-
-### Password Protected Rooms
-Rooms that require a password to join.
-
-**Protocol:**
-- `SCCP_JOIN_ROOM` payload extended: `[room_id 1B][password_len 1B][password]`
-- Server checks hash on join, responds with `SCCP_AUTH_FAIL` on wrong password
-
-**DB changes:**
-```sql
-ALTER TABLE rooms ADD COLUMN password_hash VARCHAR(128) DEFAULT NULL;
+```
+SCCP_USER_LIST  0x11  [count 1B] per user: [user_id 4B][username str8][room_id 1B]
+SCCP_USER_JOIN  0x12  [user_id 4B][username str8][room_id 1B]
+SCCP_USER_LEAVE 0x13  [user_id 4B][username str8]
+SCCP_JOIN_ROOM  0x08  extended: [room_id 1B][password_len 1B][password str]
+                      password_len=0 means no password
+SCCP_AUTH_FAIL  0x06  reused for wrong room password response
 ```
 
----
+### DB Migrations
 
-### Access Control Rooms (Mod/Admin Only)
-Rooms invisible and unjoinable by regular users.
-
-**Room access levels:** `public`, `moderator`, `admin`
-
-**Server side:**
-- `SCCP_ROOM_LIST` filtered by user role before sending
-- `SCCP_JOIN_ROOM` rejected if user lacks permission
-
-**DB changes:**
 ```sql
+ALTER TABLE rooms ADD COLUMN password_hash VARCHAR(128) DEFAULT NULL;
 ALTER TABLE rooms ADD COLUMN access_level ENUM('public','moderator','admin')
     NOT NULL DEFAULT 'public';
 ```
 
+### Build Order
+
+1. DB migrations
+2. Server
+3. Xbox client
+4. Python client
+5. WPF client
+6. Admin panel
+
 ---
 
-## Messaging
+### Server Changes
 
-### Direct Messages (DMs)
-Private one-to-one conversations. Requires user list panel first.
+- On login: send `SCCP_USER_LIST` of all currently connected users
+- On connect: broadcast `SCCP_USER_JOIN` to all connected clients
+- On disconnect: broadcast `SCCP_USER_LEAVE` to all connected clients
+- `handle_join_room`: check `password_hash`, reject with `SCCP_AUTH_FAIL` if wrong
+- `SCCP_ROOM_LIST`: filter by `access_level` based on caller role
+- Room list response: include `password_flag` byte (1=has password, 0=open) and `access_level`
 
-**Architecture:**
-- DMs implemented as special rooms with `type = 'dm'` and exactly two participants
-- `room_participants` join table tracks participants
+---
 
-**Protocol:**
-- `SCCP_DM_OPEN` (0x14) — client sends target user_id, server finds/creates DM room
+### Xbox Client
+
+- `sc_net.h`: add `SCCP_USER_LIST/JOIN/LEAVE`, `SC_User` struct, `SC_Net_RecvUserList/Join/Leave`
+- `sc_net.cpp`: implement the three recv functions
+- `chat.cpp`: in-memory user table `s_users[SC_MAX_USERS]`, updated on JOIN/LEAVE
+- R3 button toggles user overlay — draws over chat area showing online users + their room
+- Password prompt: reuse existing HID keyboard / on-screen KB when joining a locked room
+- `SC_Net_SendJoinRoom` extended to include password field (len=0 for open rooms)
+
+---
+
+### Python Client
+
+- `sc_net.py`: parse `USER_LIST/JOIN/LEAVE`, emit `sig_user_list`, `sig_user_join`, `sig_user_leave`
+- `sc_ui.py`: user list panel (sidebar or overlay), lock icon on password rooms
+- Password prompt dialog on join attempt for locked rooms
+
+---
+
+### WPF Client
+
+- `ScProtocol.cs`: add `USER_LIST/JOIN/LEAVE` constants
+- `ChatClient.cs`: `OnUserList`, `OnUserJoin`, `OnUserLeave` events
+- `MainWindow.xaml.cs`: user list panel/flyout, lock icon on room items
+- Password prompt dialog
+
+---
+
+### Admin Panel
+
+- Online Users page: live table — username, current room, connect time
+- Room create/edit: add password field and access level selector
+
+---
+
+## v1.3 — Future
+
+### Direct Messages
+Private one-to-one conversations. Requires v1.2 user list first.
+
+**Protocol:** `SCCP_DM_OPEN 0x14`
 
 **DB changes:**
 ```sql
@@ -120,13 +112,9 @@ CREATE TABLE IF NOT EXISTS room_participants (
 ---
 
 ### Mailbox System
-Offline messaging — messages delivered to a user's inbox when not connected.
+Offline messaging delivered on login.
 
-**Protocol:**
-- `SCCP_MAIL_LIST` (0x15) — unread mail on login
-- `SCCP_MAIL_SEND` (0x16) — send mail
-- `SCCP_MAIL_READ` (0x17) — mark as read
-- `SCCP_MAIL_DELETE` (0x18) — delete mail
+**Protocol:** `SCCP_MAIL_LIST 0x15`, `SCCP_MAIL_SEND 0x16`, `SCCP_MAIL_READ 0x17`, `SCCP_MAIL_DELETE 0x18`
 
 **DB changes:**
 ```sql
@@ -144,16 +132,15 @@ CREATE TABLE IF NOT EXISTS mailbox (
 
 ---
 
-## Admin Panel
+### Admin Panel Additions (v1.3)
+- Mail management page
+- Access control room management
 
-### Online Users Panel
-Live page showing all connected clients — username, current room, connection time.
+---
 
-### Mail Management
-View and send mailbox messages from the admin panel.
-
-### Access Control Room Management
-Room create/edit form gains access level selector.
+### Xbox App Icon and Title ID
+Assign a proper homebrew Title ID, 128x128 icon and 64x32 title image.
+Dashboard description: "SceneChat — Private encrypted Xbox chat"
 
 ---
 
@@ -166,4 +153,4 @@ Room create/edit form gains access level selector.
 | 1.2 | Password rooms | `password_hash` on `rooms` |
 | 1.2 | Access control | `access_level` on `rooms` |
 | 1.3 | DMs | `type` on `rooms`, `room_participants` table |
-| 1.4 | Mailbox | `mailbox` table |
+| 1.3 | Mailbox | `mailbox` table |
