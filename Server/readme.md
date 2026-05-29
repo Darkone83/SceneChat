@@ -42,7 +42,6 @@ All three processes share the same MySQL database. The chat server and admin pan
 ├── server.py               # Chat server (asyncio TCP)
 ├── voice_server.py         # Voice relay server (asyncio UDP)
 ├── admin.py                # Admin web panel (Flask)
-├── scenechat.logrotate     # logrotate config (install to /etc/logrotate.d/)
 ├── emoji/                  # Emoji PNG files (32x32)
 │   ├── smile.png
 │   ├── angry.png
