@@ -73,6 +73,8 @@ CREATE TABLE IF NOT EXISTS users (
     token          VARCHAR(128)          DEFAULT NULL,
     token_expiry   DATETIME              DEFAULT NULL,
     created_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_seen      DATETIME              DEFAULT NULL,
+    last_room      INT                   DEFAULT NULL,
 
     PRIMARY KEY (id),
     UNIQUE KEY uq_username (username)
@@ -86,6 +88,8 @@ CREATE TABLE IF NOT EXISTS users (
 - `is_banned` — 1 = banned, login rejected at the server level before password check
 - `token` — 128-character hex string (`secrets.token_hex(64)`), issued on successful login
 - `token_expiry` — used by the voice server to validate active sessions
+- `last_seen` — updated on clean disconnect; NULL if user has never disconnected cleanly
+- `last_room` — room ID the user was in at last disconnect; used by the admin panel Users page
 
 ---
 
@@ -136,6 +140,27 @@ CREATE TABLE IF NOT EXISTS messages (
 - `is_deleted` — soft delete only; records are never hard-deleted by normal operations
 - `idx_room_sent` — used by history queries (ORDER BY sent_at DESC LIMIT 50)
 - `idx_room_id` — used by admin monitor polling (WHERE room_id = ? AND id > ?)
+
+---
+
+## Schema Migrations
+
+Apply these in order when upgrading from a previous version.
+
+### v1.0 → v1.1
+
+```sql
+ALTER TABLE users ADD COLUMN last_seen DATETIME DEFAULT NULL;
+ALTER TABLE users ADD COLUMN last_room INT DEFAULT NULL;
+```
+
+### v1.1 → v1.2 (planned)
+
+```sql
+ALTER TABLE rooms ADD COLUMN password_hash VARCHAR(128) DEFAULT NULL;
+ALTER TABLE rooms ADD COLUMN access_level ENUM('public','moderator','admin')
+    NOT NULL DEFAULT 'public';
+```
 
 ---
 
@@ -195,6 +220,15 @@ The `Admin` system user is created automatically by the server on the first admi
 
 ## Backup and Restore
 
+### Via Admin Panel
+
+The admin panel Maintenance page provides one-click backup and restore:
+- Backups saved to `/opt/scenechat/backups/` on the server
+- Download, delete, or restore from the panel
+- Always back up before restoring — restore overwrites the current database
+
+### Via Command Line
+
 ### Full backup
 
 ```bash
@@ -220,8 +254,12 @@ mysqldump -u scenechat -p'XbSceneChat01!' scenechat messages > messages_backup.s
 | Version | Date | Change |
 |---------|------|--------|
 | 1.0 | 2026-05-27 | Initial schema — `users`, `rooms`, `messages` |
-| 1.1 | 2026-05-28 | Online persistence — `ALTER TABLE users ADD COLUMN last_seen DATETIME` + `last_room INT` |
+| 1.1 | 2026-05-28 | Online persistence — `last_seen DATETIME`, `last_room INT` on `users` |
+| 1.2 | Planned | Password rooms — `password_hash VARCHAR(128)` on `rooms` |
+| 1.2 | Planned | Access control — `access_level ENUM` on `rooms` |
+| 1.3 | Planned | DMs — `type ENUM` on `rooms`, `room_participants` table |
+| 1.3 | Planned | Mailbox — `mailbox` table |
 
 ---
 
-*Future additions planned: DMs (private room type + participant table), password-protected rooms (password_hash column on rooms), online presence tracking.*
+*See ROADMAP.md for the full v1.2 and v1.3 feature plan.*

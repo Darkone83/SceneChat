@@ -18,41 +18,52 @@ SceneChat is a from-scratch homebrew chat application for the original Microsoft
 
 This is not a port of an existing chat application. Every layer — from the bignum DH implementation to the Poly1305 MAC to the D3D8 font renderer — was written specifically for 733MHz Xbox hardware.
 
+> ⚠️ **Private Use Notice** — SceneChat is designed for use on private, trusted networks only. It is not hardened for public internet deployment. See [SECURITY.md](SECURITY.md) for a full breakdown of the security model and known limitations before deploying.
+
 ---
 
 ## Features
 
-### Client (Xbox)
+### Client (Xbox) — v1.1
 - Custom encrypted protocol (1024-bit DH + ChaCha20-Poly1305 + HKDF)
 - User registration and login with bcrypt-hashed credentials
 - Auto-login via saved credentials on the Xbox hard drive
 - Multi-room chat with real-time message broadcast
+- Message word wrap and newline rendering
+- Real-time deleted message sync — admin deletions reflect on-screen instantly
 - USB keyboard input via RXDK debug keyboard path
 - On-screen keyboard (OSK) for controllers-only setups
 - Inline emoji rendering via a pre-baked 256x256 BGRA atlas
 - Analog stick navigation and D-Pad cursor control
 - Back button returns to login screen without disconnecting uncleanly
+- Version number displayed on login/connecting screen
 - 480p display output targeting original Xbox hardware
 
-### Server
+### Server — v1.1
 - Python asyncio TCP server on port 8943
 - Per-connection DH key exchange with fresh session keys
 - ChaCha20-Poly1305 encryption on every packet
-- MySQL backend for users, rooms, and message history
-- bcrypt password hashing with per-user salt
+- MySQL/MariaDB backend for users, rooms, and message history
+- bcrypt password hashing (rounds=12) with per-user salt
 - Room management (text and voice room types)
+- Helper bot (`scene_bot`) — `/help`, `/online`, `/rooms`, `/emoji`, `/kick`, `/ban`, `/mute`, `/announce` and more
 - Admin message broadcast to live connected clients
-- Internal admin API on localhost:8951
+- Real-time deleted message broadcast to connected clients
+- Online presence persistence — last seen and last room per user
+- Rotating log files with logrotate config included
+- Internal admin API on localhost:8951 (not externally accessible)
 
-### Admin Panel
+### Admin Panel — v1.1
 - Flask web application on port 8950
 - Role-based access: superadmin / admin / moderator
-- Live chat monitor with 2-second polling per room
-- Admin can send messages to any room with live broadcast to Xbox clients
+- Live chat monitor with per-room message view and real-time delete broadcast
+- Admin can send messages to any room with live broadcast to all clients
 - Emoji picker with all 33 SceneChat emoji
-- Message deletion
-- User management: ban, unban, delete, role assignment
+- Message deletion with real-time sync to connected clients
+- User management: ban, unban, delete, role assignment, last seen, last room
 - Room creation and deletion
+- Log viewer with level filtering, text search, auto-scroll, and auto-refresh
+- Maintenance page: DB health stats, purge tools, backup, download, restore
 
 ---
 
@@ -124,25 +135,6 @@ SceneChat/
 │       └── rooms.html
 
 ```
-
----
-
-## Requirements
-
-### Xbox Client
-- Original Xbox with modchip or softmod
-- RXDK (Repackaged Xbox Development Kit)
-- MSVC 2003 / Xbox SDK toolchain
-- USB keyboard optional (RXDK debug keyboard path)
-
-### Server
-- Python 3.8+
-- MySQL 5.7+ or MariaDB
-- `pip install asyncio mysql-connector-python bcrypt cryptography requests pillow`
-
-### Admin Panel
-- Accessible via browser on port 8950
-- `requests` required for admin→server broadcast bridge
 
 ---
 

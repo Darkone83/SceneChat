@@ -42,17 +42,23 @@ All three processes share the same MySQL database. The chat server and admin pan
 ├── server.py               # Chat server (asyncio TCP)
 ├── voice_server.py         # Voice relay server (asyncio UDP)
 ├── admin.py                # Admin web panel (Flask)
+├── scenechat.logrotate     # logrotate config (install to /etc/logrotate.d/)
 ├── emoji/                  # Emoji PNG files (32x32)
 │   ├── smile.png
 │   ├── angry.png
 │   └── ...                 # 33 emoji total
+├── logs/                   # Server log files (auto-created)
+│   └── scenechat.log       # Rotating log, 50MB per file, 30 file retention
+├── backups/                # DB backups from admin panel (auto-created)
 └── templates/              # Jinja2 HTML templates
     ├── base.html
     ├── login.html
     ├── dashboard.html
     ├── monitor.html
     ├── users.html
-    └── rooms.html
+    ├── rooms.html
+    ├── logs.html
+    └── maintenance.html
 ```
 
 ---
@@ -85,6 +91,8 @@ DB_CONFIG = {
 | `token` | VARCHAR(128) | Session token (hex) |
 | `token_expiry` | DATETIME | Token expiry timestamp |
 | `created_at` | DATETIME | Registration timestamp |
+| `last_seen` | DATETIME | Last clean disconnect timestamp (NULL if never) |
+| `last_room` | INT | Room ID at last disconnect |
 
 ### `rooms` table
 
@@ -151,8 +159,8 @@ read_encrypted()
 0x04 LOGIN      -> lookup user, bcrypt verify, update token, send AUTH_OK/FAIL
 0x08 JOIN_ROOM  -> update client['room'], send ROOM_INFO + HISTORY
 0x0A MESSAGE    -> validate, insert to DB, broadcast MSG_RECV to room
-0x0E PING       -> send PONG
-0x10 DISCONNECT -> clean up connected_clients
+0x0E PING       -> send PONG (unencrypted)
+0x10 DISCONNECT -> update last_seen + last_room, clean up connected_clients
 ```
 
 ### Broadcast
@@ -182,6 +190,15 @@ Content-Type: application/json
 {"room_id": 1, "content": "Hello from admin :smile:"}
 ```
 
+```
+POST /admin/delete
+Content-Type: application/json
+
+{"room_id": 1, "msg_id": 42}
+```
+
+The `/admin/delete` endpoint broadcasts `SCCP_MSG_DELETE (0x19)` to all clients in the room, causing connected clients to replace the message content with `[deleted]` in real time.
+
 The handler calls `admin_broadcast()` which:
 1. Looks up or creates the reserved `Admin` user in the database
 2. Inserts the message into the `messages` table
@@ -197,6 +214,28 @@ async with server:
             admin_server.serve_forever()
         )
 ```
+
+### Logging
+
+Server uses Python's `RotatingFileHandler` — 50MB per file, 30 files retained:
+
+```python
+_log_handler = logging.handlers.RotatingFileHandler(
+    '/opt/scenechat/logs/scenechat.log',
+    maxBytes=50 * 1024 * 1024,
+    backupCount=30,
+    encoding='utf-8'
+)
+```
+
+Log also writes to stdout for systemd journal capture. Install `scenechat.logrotate` to `/etc/logrotate.d/scenechat` for daily rotation and 30-day compressed retention:
+
+```bash
+sudo cp scenechat.logrotate /etc/logrotate.d/scenechat
+sudo logrotate -d /etc/logrotate.d/scenechat  # dry run
+```
+
+---
 
 ### DH parameter generation
 
@@ -341,6 +380,8 @@ session['user_id']          = int   # not set for superadmin
 | Delete users | ✗ | ✓ | ✓ |
 | Create rooms | ✗ | ✗ | ✓ |
 | Delete rooms | ✗ | ✗ | ✓ |
+| View logs | ✓ | ✓ | ✓ |
+| DB maintenance / backup / restore | ✓ | ✓ | ✓ |
 
 ### Routes
 
@@ -363,6 +404,16 @@ session['user_id']          = int   # not set for superadmin
 | POST | `/rooms/create` | Superadmin | Create room |
 | GET | `/rooms/delete/<id>` | Superadmin | Delete room + messages |
 | GET | `/emoji/<name>.png` | — | Serve emoji PNG from `/opt/scenechat/emoji/` |
+| GET | `/logs` | Moderator | Log viewer page |
+| GET | `/api/logs` | Moderator | Fetch log lines (JSON, ?lines=N) |
+| GET | `/maintenance` | Moderator | DB health, purge, backup, restore |
+| POST | `/maintenance/backup` | Moderator | Create DB backup via mysqldump |
+| GET | `/maintenance/backup/download/<file>` | Moderator | Download backup file |
+| POST | `/maintenance/backup/delete/<file>` | Moderator | Delete backup file |
+| POST | `/maintenance/restore` | Moderator | Restore DB from uploaded .sql file |
+| POST | `/maintenance/purge/deleted` | Moderator | Hard-delete soft-deleted messages |
+| POST | `/maintenance/purge/old` | Moderator | Delete messages older than N days |
+| POST | `/maintenance/purge/inactive` | Moderator | Delete inactive user accounts |
 
 ### Message polling (monitor)
 
@@ -486,6 +537,18 @@ Status badges: Banned = red, Active = green.
 
 ---
 
+### logs.html
+
+Server log viewer. Fetches from `/api/logs?lines=N` (JSON). Client-side filtering by level (ALL / ERROR / WARNING / INFO / DEBUG), text search with match highlighting, stats bar showing error and warning counts, auto-scroll to latest entry, auto-refresh every 3 seconds.
+
+---
+
+### maintenance.html
+
+DB maintenance page. Shows table row counts and soft-deleted message count. Purge tools: deleted messages, messages older than N days, inactive users older than N days. Backup section with create, download, delete. Restore section with .sql file upload. All destructive actions have confirmation dialogs.
+
+---
+
 ### rooms.html
 
 Room management. Create form at top, table of existing rooms below.
@@ -540,11 +603,12 @@ pip3 install asyncio \
 | `cryptography` | server.py | DH parameter generation |
 | `flask` | admin.py | Web admin panel |
 | `requests` | admin.py | HTTP POST to internal admin bridge |
+| `logging.handlers` | server.py | RotatingFileHandler for log rotation |
 | `pillow` | gen_emoji.py | Emoji PNG processing for atlas generation |
 
 ### System requirements
 
-- Python 3.8+
+- Python 3.10+
 - MySQL 5.7+ or MariaDB 10.3+
 - Linux (tested on Ubuntu/Debian VPS)
 - Ports 8943, 7800, 8950 open in firewall

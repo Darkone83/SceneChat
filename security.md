@@ -4,6 +4,9 @@
 
 This document details the full security model of SceneChat — from the initial DH handshake through per-packet encryption to credential storage. All cryptographic primitives are implemented from scratch in C89/MSVC2003 for the Xbox client and in Python for the server, with no reliance on TLS or external crypto libraries on the client side.
 
+> ⚠️ **Private Use Notice**
+> SceneChat is designed and intended for use on **private, trusted networks only** — a known group of users connecting to a self-hosted server. It is **not** hardened for public internet deployment without additional infrastructure (VPN, reverse proxy with TLS, IP restrictions). Deploying SceneChat on a public-facing server without understanding the limitations in this document is done entirely at your own risk. The authors make no warranty of security for any use case beyond a private trusted network.
+
 ---
 
 ## Table of Contents
@@ -223,11 +226,12 @@ All values are big-endian unless noted. Strings use a length-prefixed encoding:
 | `JOIN_ROOM`   | 0x08 | C→S | Yes | room_id |
 | `ROOM_INFO`   | 0x09 | S→C | Yes | room_id + name + member count |
 | `MESSAGE`     | 0x0A | C→S | Yes | content string |
-| `MSG_RECV`    | 0x0B | S→C | Yes | room_id + username + content + timestamp |
+| `MSG_RECV`    | 0x0B | S→C | Yes | room_id + msg_id (4B) + username + content + timestamp |
 | `HISTORY`     | 0x0C | S→C | Yes | array of past messages |
 | `ERROR`       | 0x0D | S→C | Yes | error string |
 | `PING`        | 0x0E | C→S | Yes | keepalive |
-| `PONG`        | 0x0F | S→C | Yes | keepalive response |
+| `PONG`        | 0x0F | S→C | **No** | keepalive response (sent unencrypted) |
+| `MSG_DELETE`  | 0x19 | S→C | Yes | real-time delete — room_id + msg_id (4B) |
 | `DISCONNECT`  | 0x10 | C→S | Yes | graceful disconnect |
 
 ---
@@ -303,3 +307,4 @@ Port 8951 binds to `127.0.0.1` only — it is not reachable from outside the ser
 | Empty AAD | Packet type not authenticated | Packet type byte is outside the AEAD envelope |
 | No forward secrecy after key compromise | If session key is extracted from RAM, past traffic (if captured) is decryptable | Per-connection keys limit the blast radius |
 | Admin panel HTTP | Flask runs plain HTTP on port 8950 | Acceptable behind a firewall/VPN; add nginx + TLS for public exposure |
+| PONG unencrypted | Server sends PONG via unencrypted write_packet | PONG carries no sensitive data; client handles this as a special case |
