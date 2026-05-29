@@ -14,8 +14,8 @@ namespace SceneChatWPF.Net;
 // ── Event data ────────────────────────────────────────────────────────────────
 
 public record RoomInfo(int Id, string Name, int Type);
-public record ChatMessage(int RoomId, string Username, string Content, string Timestamp);
-public record HistoryMessage(string Username, string Content, string Timestamp);
+public record ChatMessage(int RoomId, string Username, string Content, string Timestamp, int MsgId = 0);
+public record HistoryMessage(string Username, string Content, string Timestamp, int MsgId = 0);
 
 // ── Client ────────────────────────────────────────────────────────────────────
 
@@ -30,6 +30,7 @@ public class ChatClient : IAsyncDisposable
     public event Action<ChatMessage>? OnMessage;
     public event Action<string>? OnDisconnected;
     public event Action<string>? OnError;
+    public event Action<int, int>? OnMsgDelete;       // roomId, msgId
 
     // ── State ─────────────────────────────────────────────────────────────────
     private TcpClient? _tcp;
@@ -307,6 +308,7 @@ public class ChatClient : IAsyncDisposable
             case ScProtocol.ROOM_LIST: HandleRoomList(payload); break;
             case ScProtocol.ROOM_INFO: HandleRoomInfo(payload); break;
             case ScProtocol.MSG_RECV: HandleMsgRecv(payload); break;
+            case ScProtocol.MSG_DELETE: HandleMsgDelete(payload); break;
             case ScProtocol.PONG: break;
         }
         return Task.CompletedTask;
@@ -366,10 +368,12 @@ public class ChatClient : IAsyncDisposable
         var history = new List<HistoryMessage>(count);
         for (int i = 0; i < count; i++)
         {
+            int msgId = (payload[pos] << 24) | (payload[pos + 1] << 16) |
+                        (payload[pos + 2] << 8) | payload[pos + 3]; pos += 4;
             var (user, p3) = ScProtocol.UnpackString8(payload, pos); pos = p3;
             var (content, p4) = ScProtocol.UnpackString16(payload, pos); pos = p4;
             var (ts, p5) = ScProtocol.UnpackString8(payload, pos); pos = p5;
-            history.Add(new HistoryMessage(user, content, ts));
+            history.Add(new HistoryMessage(user, content, ts, msgId));
         }
         OnRoomJoined?.Invoke(roomId, name, history);
     }
@@ -378,10 +382,21 @@ public class ChatClient : IAsyncDisposable
     {
         int pos = 0;
         int roomId = payload[pos++];
+        int msgId = (payload[pos] << 24) | (payload[pos + 1] << 16) |
+                     (payload[pos + 2] << 8) | payload[pos + 3]; pos += 4;
         var (username, p2) = ScProtocol.UnpackString8(payload, pos); pos = p2;
         var (content, p3) = ScProtocol.UnpackString16(payload, pos); pos = p3;
         var (ts, _) = ScProtocol.UnpackString8(payload, pos);
-        OnMessage?.Invoke(new ChatMessage(roomId, username, content, ts));
+        OnMessage?.Invoke(new ChatMessage(roomId, username, content, ts, msgId));
+    }
+
+    private void HandleMsgDelete(byte[] payload)
+    {
+        if (payload.Length < 5) return;
+        int roomId = payload[0];
+        int msgId = (payload[1] << 24) | (payload[2] << 16) |
+                     (payload[3] << 8) | payload[4];
+        OnMsgDelete?.Invoke(roomId, msgId);
     }
 
     // ── Public send methods ───────────────────────────────────────────────────

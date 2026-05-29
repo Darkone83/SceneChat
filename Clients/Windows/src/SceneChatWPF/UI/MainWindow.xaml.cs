@@ -15,6 +15,7 @@ public partial class MainWindow : Window
 {
     private ChatClient? _client;
     private int _currentRoomId = -1;
+    private readonly Dictionary<int, Paragraph> _msgParagraphs = new(); // msgId -> Paragraph
     private bool _doRegister;
     private string _pendingUser = "";
     private string _pendingPass = "";
@@ -147,15 +148,25 @@ public partial class MainWindow : Window
             _currentRoomId = roomId;
             TxtRoomName.Text = $"# {name}";
             FeedBox.Document.Blocks.Clear();
+            _msgParagraphs.Clear();
             foreach (var m in history)
-                AppendMessage(m.Username, m.Content, m.Timestamp);
+                AppendMessage(m.Username, m.Content, m.Timestamp, m.MsgId);
             SetStatus($"#{name}");
         });
 
         _client.OnMessage += msg => Dispatcher.Invoke(() =>
         {
             if (msg.RoomId == _currentRoomId)
-                AppendMessage(msg.Username, msg.Content, msg.Timestamp);
+                AppendMessage(msg.Username, msg.Content, msg.Timestamp, msg.MsgId);
+        });
+
+        _client.OnMsgDelete += (roomId, msgId) => Dispatcher.Invoke(() =>
+        {
+            if (roomId == _currentRoomId && _msgParagraphs.TryGetValue(msgId, out var para))
+            {
+                para.Inlines.Clear();
+                para.Inlines.Add(new Run("[deleted]") { Foreground = BrMuted, FontStyle = FontStyles.Italic });
+            }
         });
 
         _client.OnError += err => Dispatcher.Invoke(() => SetStatus($"Error: {err}"));
@@ -186,7 +197,7 @@ public partial class MainWindow : Window
 
     // ── Message rendering ─────────────────────────────────────────────────────
 
-    private void AppendMessage(string username, string content, string ts)
+    private void AppendMessage(string username, string content, string ts, int msgId = 0)
     {
         var para = new Paragraph { Margin = new Thickness(0, 2, 0, 2) };
 
@@ -203,6 +214,7 @@ public partial class MainWindow : Window
         AppendContentInlines(para, content);
 
         FeedBox.Document.Blocks.Add(para);
+        if (msgId != 0) _msgParagraphs[msgId] = para;
         FeedBox.ScrollToEnd();
     }
 

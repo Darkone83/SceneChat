@@ -385,6 +385,7 @@ class ChatWidget(QWidget):
         self._current_room_name = ''
         self._username        = ''
         self._rooms           = {}   # id -> (name, type)
+        self._msg_ids         = []   # msg_id per appended message (0=unknown)
         self._build_ui()
 
     def _build_ui(self):
@@ -498,15 +499,17 @@ class ChatWidget(QWidget):
         self._current_room_name = name
         self.lbl_room_name.setText(f'# {name}')
         self.feed.clear()
+        self._msg_ids = []
         for msg in history:
-            self._append_message(msg['username'], msg['content'], msg['ts'])
+            self._append_message(msg['username'], msg['content'], msg['ts'], msg.get('msg_id', 0))
 
-    def append_message(self, room_id: int, username: str, content: str, ts: str):
+    def append_message(self, room_id: int, username: str, content: str, ts: str, msg_id: int = 0):
         if room_id != self._current_room:
             return
-        self._append_message(username, content, ts)
+        self._append_message(username, content, ts, msg_id)
 
-    def _append_message(self, username: str, content: str, ts: str):
+    def _append_message(self, username: str, content: str, ts: str, msg_id: int = 0):
+        self._msg_ids.append(msg_id)
         cursor = self.feed.textCursor()
         cursor.movePosition(QTextCursor.End)
 
@@ -527,6 +530,23 @@ class ChatWidget(QWidget):
         room_id = item.data(Qt.UserRole)
         if room_id != self._current_room:
             self.sig_join_room.emit(room_id)
+
+    def delete_message(self, room_id: int, msg_id: int):
+        """Find message by msg_id and replace content with [deleted]."""
+        if room_id != self._current_room or msg_id == 0:
+            return
+        if msg_id not in self._msg_ids:
+            return
+        idx    = self._msg_ids.index(msg_id)
+        doc    = self.feed.document()
+        block  = doc.findBlockByNumber(idx)
+        if not block.isValid():
+            return
+        cursor = QTextCursor(block)
+        cursor.select(QTextCursor.LineUnderCursor)
+        cursor.insertHtml(
+            f'<span style="color:{COL_MUTED}; font-style:italic;">[deleted]</span><br>'
+        )
 
     def _on_send(self):
         if self._current_room is None:
@@ -553,7 +573,7 @@ class ChatWidget(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('SceneChat')
+        self.setWindowTitle('SceneChat v1.1')
         self.setMinimumSize(900, 600)
         self.resize(1100, 700)
 
@@ -650,6 +670,7 @@ class MainWindow(QMainWindow):
         self._worker.sig_room_list.connect(self._on_room_list)
         self._worker.sig_room_joined.connect(self._on_room_joined)
         self._worker.sig_message.connect(self._on_message)
+        self._worker.sig_msg_delete.connect(self._on_msg_delete)
         self._worker.sig_error.connect(self._on_error)
         self._worker.sig_disconnected.connect(self._on_disconnected)
         self._worker.start()
@@ -699,9 +720,13 @@ class MainWindow(QMainWindow):
         self._chat_widget.show_history(room_id, name, history)
         self.status_bar.showMessage(f'#{name}')
 
-    @Slot(int, str, str, str)
-    def _on_message(self, room_id: int, username: str, content: str, ts: str):
-        self._chat_widget.append_message(room_id, username, content, ts)
+    @Slot(int, str, str, str, int)
+    def _on_message(self, room_id: int, username: str, content: str, ts: str, msg_id: int):
+        self._chat_widget.append_message(room_id, username, content, ts, msg_id)
+
+    @Slot(int, int)
+    def _on_msg_delete(self, room_id: int, msg_id: int):
+        self._chat_widget.delete_message(room_id, msg_id)
 
     @Slot(str)
     def _on_error(self, msg: str):

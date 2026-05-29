@@ -2,8 +2,6 @@
 
 **Team Resurgent / Darkone83**
 
-This document tracks planned features and future development direction for SceneChat. Items are grouped by area and ordered roughly by dependency.
-
 ---
 
 ## Table of Contents
@@ -12,8 +10,7 @@ This document tracks planned features and future development direction for Scene
 2. [Chat Features](#chat-features)
 3. [Access Control](#access-control)
 4. [Messaging](#messaging)
-5. [Server and Infrastructure](#server-and-infrastructure)
-6. [Admin Panel](#admin-panel)
+5. [Admin Panel](#admin-panel)
 
 ---
 
@@ -144,22 +141,6 @@ CREATE TABLE IF NOT EXISTS mailbox (
     PRIMARY KEY (id)
 );
 ```
-
----
-
-## Server and Infrastructure
-
-### Deleted Message Sync to Client
-When an admin deletes a message from the monitor, propagate the deletion to connected clients in real time.
-
-**Protocol:**
-- `SCCP_MSG_DELETE` (0x19) — `[room_id 1B][message_id 4B]` broadcast to room
-
-**Server side:**
-- Admin delete route POSTs to internal bridge after DB update
-- Bridge broadcasts `SCCP_MSG_DELETE` to affected room
-
-**DB changes:** none — `is_deleted` already exists
 
 ---
 

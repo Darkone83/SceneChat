@@ -8,28 +8,29 @@ namespace SceneChatWPF.Net;
 public static class ScProtocol
 {
     // Packet types
-    public const byte DH_INIT      = 0x01;
-    public const byte DH_RESPONSE  = 0x02;
-    public const byte REGISTER     = 0x03;
-    public const byte LOGIN        = 0x04;
-    public const byte AUTH_OK      = 0x05;
-    public const byte AUTH_FAIL    = 0x06;
-    public const byte ROOM_LIST    = 0x07;
-    public const byte JOIN_ROOM    = 0x08;
-    public const byte ROOM_INFO    = 0x09;
-    public const byte MESSAGE      = 0x0A;
-    public const byte MSG_RECV     = 0x0B;
-    public const byte HISTORY      = 0x0C;
-    public const byte ERROR        = 0x0D;
-    public const byte PING         = 0x0E;
-    public const byte PONG         = 0x0F;
-    public const byte DISCONNECT   = 0x10;
+    public const byte DH_INIT = 0x01;
+    public const byte DH_RESPONSE = 0x02;
+    public const byte REGISTER = 0x03;
+    public const byte LOGIN = 0x04;
+    public const byte AUTH_OK = 0x05;
+    public const byte AUTH_FAIL = 0x06;
+    public const byte ROOM_LIST = 0x07;
+    public const byte JOIN_ROOM = 0x08;
+    public const byte ROOM_INFO = 0x09;
+    public const byte MESSAGE = 0x0A;
+    public const byte MSG_RECV = 0x0B;
+    public const byte HISTORY = 0x0C;
+    public const byte ERROR = 0x0D;
+    public const byte PING = 0x0E;
+    public const byte PONG = 0x0F;
+    public const byte DISCONNECT = 0x10;
+    public const byte MSG_DELETE = 0x19;
 
     // ── String packing (matches server.py pack_string8/16) ──────────────────
 
     public static byte[] PackString8(string s)
     {
-        var b   = Encoding.UTF8.GetBytes(s);
+        var b = Encoding.UTF8.GetBytes(s);
         var len = Math.Min(b.Length, 255);
         var out_ = new byte[1 + len];
         out_[0] = (byte)len;
@@ -39,7 +40,7 @@ public static class ScProtocol
 
     public static byte[] PackString16(string s)
     {
-        var b   = Encoding.UTF8.GetBytes(s);
+        var b = Encoding.UTF8.GetBytes(s);
         var len = Math.Min(b.Length, 65535);
         var out_ = new byte[2 + len];
         out_[0] = (byte)(len >> 8);
@@ -66,7 +67,7 @@ public static class ScProtocol
     public static byte[] FramePacket(byte type, byte[] payload)
     {
         int totalLen = 2 + 1 + payload.Length;
-        var frame    = new byte[totalLen];
+        var frame = new byte[totalLen];
         frame[0] = (byte)(totalLen >> 8);
         frame[1] = (byte)(totalLen & 0xFF);
         frame[2] = type;

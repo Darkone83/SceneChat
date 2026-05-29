@@ -610,4 +610,11 @@ void Auth_Draw(IDirect3DDevice8* pDevice) {
 
     default: break;
     }
+
+    /* Version string -- bottom right corner */
+    Font_DrawTextRight(pDevice,
+        (float)UI_VIRT_W - 8.0f,
+        (float)UI_VIRT_H - Font_GlyphHeight(FONT_SIZE_SMALL) - 6.0f,
+        "v1.1",
+        FONT_SIZE_SMALL, UI_COL_TEXT_MUTED);
 }

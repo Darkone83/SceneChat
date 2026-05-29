@@ -892,6 +892,7 @@ int SC_Net_RecvRoomInfo(SC_RoomInfo* pOut) {
     pOut->history_count = data[pos++];
     if (pOut->history_count > SC_MAX_HISTORY) pOut->history_count = SC_MAX_HISTORY;
     for (i = 0; i < pOut->history_count; i++) {
+        pos += 4; /* skip msg_id - protocol v1.1 */
         pos = unpack_str8(data, pos, pOut->history[i].username, sizeof(pOut->history[i].username));
         pos = unpack_str16(data, pos, pOut->history[i].content, sizeof(pOut->history[i].content));
         pos = unpack_str8(data, pos, pOut->history[i].timestamp, sizeof(pOut->history[i].timestamp));
@@ -900,6 +901,11 @@ int SC_Net_RecvRoomInfo(SC_RoomInfo* pOut) {
 }
 
 int SC_Net_RecvMessage(SC_Message* pOut) {
+    unsigned int dummy = 0;
+    return SC_Net_RecvMessageEx(pOut, &dummy);
+}
+
+int SC_Net_RecvMessageEx(SC_Message* pOut, unsigned int* pMsgId) {
     unsigned char data[SC_MAX_PACKET];
     int len, idx, pos;
     idx = queue_peek_type(SCCP_MSG_RECV);
@@ -907,9 +913,29 @@ int SC_Net_RecvMessage(SC_Message* pOut) {
     queue_pop(idx, data, &len);
     pOut->room_id = data[0];
     pos = 1;
+    *pMsgId = ((unsigned int)data[pos] << 24) |
+        ((unsigned int)data[pos + 1] << 16) |
+        ((unsigned int)data[pos + 2] << 8) |
+        (unsigned int)data[pos + 3];
+    pos += 4;
     pos = unpack_str8(data, pos, pOut->username, sizeof(pOut->username));
     pos = unpack_str16(data, pos, pOut->content, sizeof(pOut->content));
     pos = unpack_str8(data, pos, pOut->timestamp, sizeof(pOut->timestamp));
+    return 1;
+}
+
+int SC_Net_RecvMsgDelete(unsigned char* pRoomId, unsigned int* pMsgId) {
+    unsigned char data[SC_MAX_PACKET];
+    int len, idx;
+    idx = queue_peek_type(SCCP_MSG_DELETE);
+    if (idx < 0) return 0;
+    queue_pop(idx, data, &len);
+    if (len < 5) return 0;
+    *pRoomId = data[0];
+    *pMsgId = ((unsigned int)data[1] << 24) |
+        ((unsigned int)data[2] << 16) |
+        ((unsigned int)data[3] << 8) |
+        (unsigned int)data[4];
     return 1;
 }
 

@@ -31,6 +31,7 @@ SCCP_JOIN_ROOM   = 0x08
 SCCP_ROOM_INFO   = 0x09
 SCCP_MESSAGE     = 0x0A
 SCCP_MSG_RECV    = 0x0B
+SCCP_MSG_DELETE  = 0x19
 SCCP_HISTORY     = 0x0C
 SCCP_ERROR       = 0x0D
 SCCP_PING        = 0x0E
@@ -150,7 +151,8 @@ class ChatWorker(QThread):
     sig_auth_fail    = Signal(str)
     sig_room_list    = Signal(list)
     sig_room_joined  = Signal(int, str, list)
-    sig_message      = Signal(int, str, str, str)
+    sig_message      = Signal(int, str, str, str, int)  # room_id, user, content, ts, msg_id
+    sig_msg_delete   = Signal(int, int)                 # room_id, msg_id
     sig_error        = Signal(str)
     sig_disconnected = Signal(str)
 
@@ -303,6 +305,8 @@ class ChatWorker(QThread):
             self._on_room_info(payload)
         elif pkt_type == SCCP_MSG_RECV:
             self._on_msg_recv(payload)
+        elif pkt_type == SCCP_MSG_DELETE:
+            self._on_msg_delete(payload)
         elif pkt_type == SCCP_PONG:
             pass
 
@@ -343,24 +347,34 @@ class ChatWorker(QThread):
             count  = payload[pos]; pos += 1
             history = []
             for _ in range(count):
+                msg_id    = int.from_bytes(payload[pos:pos+4], 'big'); pos += 4
                 username, pos = _unpack_string8(payload, pos)
                 content,  pos = _unpack_string16(payload, pos)
                 ts,       pos = _unpack_string8(payload, pos)
-                history.append({'username': username, 'content': content, 'ts': ts})
+                history.append({'username': username, 'content': content, 'ts': ts, 'msg_id': msg_id})
             self.sig_room_joined.emit(room_id, name, history)
         except Exception as e:
             self.sig_error.emit(f'ROOM_INFO parse error: {e}')
 
     def _on_msg_recv(self, payload: bytes):
         try:
-            pos = 0
-            room_id       = payload[pos]; pos += 1
+            pos    = 0
+            room_id = payload[pos]; pos += 1
+            msg_id  = int.from_bytes(payload[pos:pos+4], 'big'); pos += 4
             username, pos = _unpack_string8(payload, pos)
             content,  pos = _unpack_string16(payload, pos)
             ts,       _   = _unpack_string8(payload, pos)
-            self.sig_message.emit(room_id, username, content, ts)
+            self.sig_message.emit(room_id, username, content, ts, msg_id)
         except Exception as e:
             self.sig_error.emit(f'MSG_RECV parse error: {e}')
+
+    def _on_msg_delete(self, payload: bytes):
+        try:
+            room_id = payload[0]
+            msg_id  = int.from_bytes(payload[1:5], 'big')
+            self.sig_msg_delete.emit(room_id, msg_id)
+        except Exception as e:
+            self.sig_error.emit(f'MSG_DELETE parse error: {e}')
 
     # ── Send ──────────────────────────────────────────────────────────────────
 

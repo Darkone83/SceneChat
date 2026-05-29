@@ -1,0 +1,122 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1 class="page-title">Maintenance</h1>
+
+<!-- Flash messages -->
+{% with messages = get_flashed_messages() %}
+{% if messages %}
+<div class="card" style="margin-bottom:12px;">
+    {% for m in messages %}
+    <div style="color:#39ff14; padding:6px 0;">{{ m }}</div>
+    {% endfor %}
+</div>
+{% endif %}
+{% endwith %}
+
+<!-- DB Stats -->
+<div class="card" style="margin-bottom:16px;">
+    <h2 class="section-title">Database Health</h2>
+    <table>
+        <thead>
+            <tr><th>Table</th><th>Rows</th></tr>
+        </thead>
+        <tbody>
+            <tr><td>users</td><td>{{ stats.get('users', 'N/A') }}</td></tr>
+            <tr><td>rooms</td><td>{{ stats.get('rooms', 'N/A') }}</td></tr>
+            <tr><td>messages (active)</td><td>{{ stats.get('active_messages', 'N/A') }}</td></tr>
+            <tr><td>messages (deleted)</td><td style="color:#ff4444;">{{ stats.get('deleted_messages', 'N/A') }}</td></tr>
+            <tr><td>mailbox</td><td>{{ stats.get('mailbox', 'N/A') }}</td></tr>
+        </tbody>
+    </table>
+</div>
+
+<!-- Purge Tools -->
+<div class="card" style="margin-bottom:16px;">
+    <h2 class="section-title">Cleanup</h2>
+    <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:flex-start;">
+
+        <!-- Purge deleted messages -->
+        <form method="POST" action="{{ url_for('purge_deleted_messages') }}"
+              onsubmit="return confirm('Permanently delete all [deleted] messages from DB?')">
+            <button type="submit" class="btn btn-red">Purge Deleted Messages</button>
+        </form>
+
+        <!-- Purge old messages -->
+        <form method="POST" action="{{ url_for('purge_old_messages') }}"
+              style="display:flex; gap:6px; align-items:center;"
+              onsubmit="return confirm('Permanently delete messages older than specified days?')">
+            <input type="number" name="days" value="30" min="1" max="3650"
+                   style="width:70px; padding:4px 8px; font-size:0.85em;">
+            <label style="font-size:0.85em; color:#aaa;">days</label>
+            <button type="submit" class="btn btn-red">Purge Old Messages</button>
+        </form>
+
+        <!-- Purge inactive users -->
+        <form method="POST" action="{{ url_for('purge_inactive_users') }}"
+              style="display:flex; gap:6px; align-items:center;"
+              onsubmit="return confirm('Permanently delete inactive user accounts?')">
+            <input type="number" name="days" value="90" min="1" max="3650"
+                   style="width:70px; padding:4px 8px; font-size:0.85em;">
+            <label style="font-size:0.85em; color:#aaa;">days inactive</label>
+            <button type="submit" class="btn btn-red">Purge Inactive Users</button>
+        </form>
+
+    </div>
+    <p style="color:#555; font-size:0.8em; margin-top:10px;">
+        Admins, moderators, and scene_bot are never purged by inactive user cleanup.
+    </p>
+</div>
+
+<!-- Backup -->
+<div class="card" style="margin-bottom:16px;">
+    <h2 class="section-title">Backup</h2>
+    <form method="POST" action="{{ url_for('db_backup') }}" style="margin-bottom:16px;">
+        <button type="submit" class="btn btn-green">Create Backup Now</button>
+    </form>
+
+    {% if backups %}
+    <table>
+        <thead>
+            <tr><th>File</th><th>Size</th><th>Date</th><th>Actions</th></tr>
+        </thead>
+        <tbody>
+        {% for b in backups %}
+        <tr>
+            <td style="font-family:monospace; font-size:0.85em;">{{ b.name }}</td>
+            <td style="color:#555;">{{ (b.size / 1024)|round(1) }} KB</td>
+            <td style="color:#555;">{{ b.mtime }}</td>
+            <td style="display:flex; gap:6px;">
+                <a href="{{ url_for('db_backup_download', filename=b.name) }}"
+                   class="btn btn-purple">Download</a>
+                <form method="POST"
+                      action="{{ url_for('db_backup_delete', filename=b.name) }}"
+                      onsubmit="return confirm('Delete this backup?')">
+                    <button type="submit" class="btn btn-red">Delete</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p style="color:#555;">No backups yet.</p>
+    {% endif %}
+</div>
+
+<!-- Restore -->
+<div class="card">
+    <h2 class="section-title">Restore from Backup</h2>
+    <p style="color:#ff4444; font-size:0.85em; margin-bottom:10px;">
+        Warning: This will overwrite the current database. Create a backup first.
+    </p>
+    <form method="POST" action="{{ url_for('db_restore') }}"
+          enctype="multipart/form-data"
+          style="display:flex; gap:8px; align-items:center;"
+          onsubmit="return confirm('This will overwrite the entire database. Are you sure?')">
+        <input type="file" name="sql_file" accept=".sql" required
+               style="font-size:0.85em;">
+        <button type="submit" class="btn btn-red">Restore</button>
+    </form>
+</div>
+
+{% endblock %}

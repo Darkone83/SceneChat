@@ -34,9 +34,12 @@
 /*    Per-room message cache                                                   */
 
 typedef struct {
-    SC_Message  msgs[CHAT_MSG_BUF];
-    int         count;
-    int         scroll;    /* index of first visible message (from bottom=0) */
+    SC_Message   msgs[CHAT_MSG_BUF];
+    unsigned int msg_ids[CHAT_MSG_BUF];  /* DB msg_id per message (0=unknown) */
+    int          msg_lines[CHAT_MSG_BUF]; /* pre-calculated line count per msg */
+    int          count;
+    int          scroll;    /* scroll offset in LINES (not messages)          */
+    int          total_lines; /* sum of all msg_lines[]                       */
 } RoomCache;
 
 /*    Internal state                                                           */
@@ -89,24 +92,104 @@ static void set_status(const char* msg) {
     s_status_timer = 180;   /* show for ~3 seconds                           */
 }
 
-static void cache_append(const SC_Message* msg) {
+/* Measure how many lines a message content will occupy given chat width.
+   Handles both word-wrap and explicit \n line breaks.
+   chat_w = available content width in virtual pixels (after prefix).       */
+static int measure_msg_lines(const SC_Message* msg, float chat_w) {
+    /* prefix: "[HH:MM] Username " */
+    char  prefix[SC_MAX_USERNAME + 12];
+    float prefix_w;
+    float cw;
+    const char* p;
+    char  line[SC_MAX_MSGLEN + 1];
+    int   llen;
+    int   lines;
+    int   line_w;
+    char  c;
+
+    wsprintf(prefix, "[%s] %s", msg->timestamp, msg->username);
+    prefix_w = (float)Font_MeasureText(prefix, FONT_SIZE_SMALL) + 6.0f;
+    cw = chat_w - prefix_w;
+    if (cw < 40.0f) cw = 40.0f;
+
+    p = msg->content;
+    llen = 0;
+    lines = 1;
+    line[0] = 0;
+
+    while (*p) {
+        c = *p++;
+
+        /* Explicit newline */
+        if (c == '\n') {
+            lines++;
+            llen = 0;
+            line[0] = 0;
+            cw = chat_w;   /* subsequent lines use full width */
+            continue;
+        }
+
+        line[llen++] = c;
+        line[llen] = 0;
+        line_w = Font_MeasureText(line, FONT_SIZE_SMALL);
+
+        if (line_w > (int)cw) {
+            /* Back up one char, emit line, start new */
+            if (llen > 1) { p--; line[--llen] = 0; }
+            lines++;
+            llen = 0;
+            line[0] = 0;
+            cw = chat_w;
+        }
+    }
+
+    return lines;
+}
+
+static void cache_recalc_lines(void) {
+    int   i;
+    float cw = (float)(UI_VIRT_W - UI_SIDEBAR_W) - 8.0f;
+    s_msgcache.total_lines = 0;
+    for (i = 0; i < s_msgcache.count; i++) {
+        s_msgcache.msg_lines[i] = measure_msg_lines(&s_msgcache.msgs[i], cw);
+        s_msgcache.total_lines += s_msgcache.msg_lines[i];
+    }
+}
+
+static void cache_append(const SC_Message* msg, unsigned int msg_id) {
+    float cw = (float)(UI_VIRT_W - UI_SIDEBAR_W) - 8.0f;
+    int   nl;
     if (s_msgcache.count < CHAT_MSG_BUF) {
-        s_msgcache.msgs[s_msgcache.count++] = *msg;
+        s_msgcache.msgs[s_msgcache.count] = *msg;
+        s_msgcache.msg_ids[s_msgcache.count] = msg_id;
+        nl = measure_msg_lines(msg, cw);
+        s_msgcache.msg_lines[s_msgcache.count] = nl;
+        s_msgcache.total_lines += nl;
+        s_msgcache.count++;
     }
     else {
         /* Shift buffer -- drop oldest */
         int i;
-        for (i = 0; i < CHAT_MSG_BUF - 1; i++)
+        s_msgcache.total_lines -= s_msgcache.msg_lines[0];
+        for (i = 0; i < CHAT_MSG_BUF - 1; i++) {
             s_msgcache.msgs[i] = s_msgcache.msgs[i + 1];
+            s_msgcache.msg_ids[i] = s_msgcache.msg_ids[i + 1];
+            s_msgcache.msg_lines[i] = s_msgcache.msg_lines[i + 1];
+        }
         s_msgcache.msgs[CHAT_MSG_BUF - 1] = *msg;
+        s_msgcache.msg_ids[CHAT_MSG_BUF - 1] = msg_id;
+        nl = measure_msg_lines(msg, cw);
+        s_msgcache.msg_lines[CHAT_MSG_BUF - 1] = nl;
+        s_msgcache.total_lines += nl;
     }
-    /* Auto-scroll to bottom if already at bottom */
+    /* Auto-scroll to bottom */
     if (s_msgcache.scroll == 0) s_msgcache.scroll = 0;
 }
 
 static void cache_clear(void) {
     s_msgcache.count = 0;
     s_msgcache.scroll = 0;
+    s_msgcache.total_lines = 0;
 }
 
 /* Visible message area in virtual coords */
@@ -115,7 +198,7 @@ static float chat_area_h(void) {
     return (float)(UI_VIRT_H - UI_HEADER_H - UI_INPUT_H);
 }
 
-static int visible_msg_count(void) {
+static int visible_line_count(void) {
     return Ftoi(chat_area_h() / CHAT_MSG_LINE_H);
 }
 
@@ -285,20 +368,53 @@ int Chat_Update(WORD wPressed) {
             s_joining = 0;
             cache_clear();
             for (i = 0; i < room_info.history_count; i++)
-                cache_append(&room_info.history[i]);
+                cache_append(&room_info.history[i], 0); /* msg_id skipped in history */
         }
     }
 
     /* Consume incoming messages */
-    while (SC_Net_RecvMessage(&msg)) {
-        int ridx = room_idx_by_id(msg.room_id);
-        if (ridx == s_cur_room) {
-            cache_append(&msg);
+    {
+        unsigned int live_msg_id;
+        while (SC_Net_RecvMessageEx(&msg, &live_msg_id)) {
+            int ridx = room_idx_by_id(msg.room_id);
+            if (ridx == s_cur_room) {
+                cache_append(&msg, live_msg_id);
+            }
+            else if (ridx >= 0) {
+                /* Notification for other room */
+                s_notify_room = ridx;
+                s_notify_timer = 120;
+            }
         }
-        else if (ridx >= 0) {
-            /* Notification for other room */
-            s_notify_room = ridx;
-            s_notify_timer = 120;
+    }
+
+    /* Consume MSG_DELETE */
+    {
+        unsigned char del_room;
+        unsigned int  del_id;
+        int           di;
+        while (SC_Net_RecvMsgDelete(&del_room, &del_id)) {
+            {
+                char dbg[64];
+                wsprintf(dbg, "DEL room=%d id=%lu", del_room, del_id);
+                set_status(dbg);
+            }
+            if ((int)del_room == s_joined_id) {
+                for (di = 0; di < s_msgcache.count; di++) {
+                    if (s_msgcache.msg_ids[di] == del_id) {
+                        lstrcpynA(s_msgcache.msgs[di].content,
+                            "[deleted]", SC_MAX_MSGLEN);
+                        {
+                            float cw2 = (float)(UI_VIRT_W - UI_SIDEBAR_W) - 8.0f;
+                            int old_nl = s_msgcache.msg_lines[di];
+                            int new_nl = measure_msg_lines(&s_msgcache.msgs[di], cw2);
+                            s_msgcache.msg_lines[di] = new_nl;
+                            s_msgcache.total_lines += (new_nl - old_nl);
+                        }
+                        break;
+                    }
+                }
+            }
         }
     }
 
@@ -332,8 +448,9 @@ int Chat_Update(WORD wPressed) {
 
     /* Message scroll with right stick Y */
     if (ry_stick > CHAT_DEADZONE) {
+        int max_scroll;
         s_msgcache.scroll++;
-        int max_scroll = s_msgcache.count - visible_msg_count();
+        max_scroll = s_msgcache.total_lines - visible_line_count();
         if (max_scroll < 0) max_scroll = 0;
         if (s_msgcache.scroll > max_scroll) s_msgcache.scroll = max_scroll;
     }
@@ -360,10 +477,13 @@ int Chat_Update(WORD wPressed) {
     else {
         /* Chat focus: scroll messages */
         if (wPressed & BTN_DPAD_UP) {
-            s_msgcache.scroll++;
-            int max_scroll = s_msgcache.count - visible_msg_count();
-            if (max_scroll < 0) max_scroll = 0;
-            if (s_msgcache.scroll > max_scroll) s_msgcache.scroll = max_scroll;
+            {
+                int max_scroll;
+                s_msgcache.scroll++;
+                max_scroll = s_msgcache.total_lines - visible_line_count();
+                if (max_scroll < 0) max_scroll = 0;
+                if (s_msgcache.scroll > max_scroll) s_msgcache.scroll = max_scroll;
+            }
         }
         if (wPressed & BTN_DPAD_DOWN) {
             s_msgcache.scroll--;
@@ -466,7 +586,7 @@ static float draw_message(IDirect3DDevice8* pDevice,
     Font_DrawText(pDevice, x, cy, prefix,
         FONT_SIZE_SMALL, user_col, 0);
 
-    /* Message content -- may need to wrap */
+    /* Message content -- wraps on overflow and explicit \n */
     {
         const char* p = msg->content;
         float        cx = x + prefix_w + 6.0f;
@@ -474,23 +594,34 @@ static float draw_message(IDirect3DDevice8* pDevice,
         int          line_w;
         char         line[SC_MAX_MSGLEN + 1];
         int          llen = 0;
+        char         c;
 
         while (*p) {
-            char c = *p++;
+            c = *p++;
+
+            /* Explicit newline -- flush current line and move down */
+            if (c == '\n') {
+                if (llen > 0) {
+                    Emoji_DrawMixed(pDevice, cx, cy, line,
+                        FONT_SIZE_SMALL, UI_COL_TEXT_PRI, (int)cw);
+                }
+                cy += (float)CHAT_MSG_LINE_H;
+                cx = x;
+                cw = max_w;
+                llen = 0;
+                line[0] = 0;
+                continue;
+            }
+
             line[llen++] = c;
             line[llen] = 0;
-
             line_w = Font_MeasureText(line, FONT_SIZE_SMALL);
 
-            if (line_w > (int)cw || *p == 0) {
-                /* If we overflowed, back up one char and emit */
-                if (line_w > (int)cw && llen > 1) {
-                    p--;
-                    line[--llen] = 0;
-                }
+            if (line_w > (int)cw) {
+                /* Overflow -- back up one char and emit */
+                if (llen > 1) { p--; line[--llen] = 0; }
                 Emoji_DrawMixed(pDevice, cx, cy, line,
-                    FONT_SIZE_SMALL, UI_COL_TEXT_PRI,
-                    (int)cw);
+                    FONT_SIZE_SMALL, UI_COL_TEXT_PRI, (int)cw);
                 cy += (float)CHAT_MSG_LINE_H;
                 cx = x;
                 cw = max_w;
@@ -498,7 +629,12 @@ static float draw_message(IDirect3DDevice8* pDevice,
                 line[0] = 0;
             }
         }
-        if (llen > 0) cy += (float)CHAT_MSG_LINE_H;
+        /* Flush remaining content */
+        if (llen > 0) {
+            Emoji_DrawMixed(pDevice, cx, cy, line,
+                FONT_SIZE_SMALL, UI_COL_TEXT_PRI, (int)cw);
+            cy += (float)CHAT_MSG_LINE_H;
+        }
     }
 
     return cy - y;
@@ -606,23 +742,37 @@ void Chat_Draw(IDirect3DDevice8* pDevice) {
         float cy0 = (float)UI_HEADER_H + 4.0f;
         float cw = (float)(UI_VIRT_W - UI_SIDEBAR_W) - 8.0f;
         float ch = chat_area_h() - 8.0f;
-        int   vis = visible_msg_count();
-        int   start = s_msgcache.count - vis - s_msgcache.scroll;
+        int   vis = visible_line_count();
         float my = cy0 + ch;   /* render from bottom up */
-        int   n, idx;
-        float line_h;
+        int   idx;
+        int   lines_placed;     /* lines consumed so far (bottom-up)        */
+        int   lines_skip;       /* lines to skip due to scroll offset        */
+        float msg_h;
 
-        if (start < 0) start = 0;
-        n = s_msgcache.count - start;
-        if (n > vis) n = vis;
+        /* scroll is in lines -- skip that many lines from the bottom */
+        lines_skip = s_msgcache.scroll;
+        lines_placed = 0;
 
-        /* Render messages bottom-up so newest is at the bottom */
-        for (idx = start + n - 1; idx >= start; idx--) {
+        /* Walk messages newest-first */
+        for (idx = s_msgcache.count - 1; idx >= 0; idx--) {
             const SC_Message* m = &s_msgcache.msgs[idx];
-            line_h = (float)CHAT_MSG_LINE_H;
-            my -= line_h;
-            if (my < cy0) break;
-            draw_message(pDevice, cx0, my, cw, m);
+            int nl = s_msgcache.msg_lines[idx];
+
+            /* Skip lines for scroll offset */
+            if (lines_skip >= nl) {
+                lines_skip -= nl;
+                continue;
+            }
+
+            msg_h = (float)(nl * CHAT_MSG_LINE_H);
+            my -= msg_h;
+            lines_placed += nl;
+
+            if (my >= cy0) {
+                draw_message(pDevice, cx0, my, cw, m);
+            }
+
+            if (lines_placed >= vis) break;
         }
 
         /* Room name heading */
@@ -639,11 +789,11 @@ void Chat_Draw(IDirect3DDevice8* pDevice) {
         }
 
         /* Scrollbar */
-        if (s_msgcache.count > vis) {
+        if (s_msgcache.total_lines > vis) {
             UI_DrawScrollbar(pDevice,
                 (float)(UI_VIRT_W - UI_SCROLLBAR_W - 2),
                 cy0, ch,
-                s_msgcache.count, vis, s_msgcache.scroll);
+                s_msgcache.total_lines, vis, s_msgcache.scroll);
         }
 
         /* Joining indicator */

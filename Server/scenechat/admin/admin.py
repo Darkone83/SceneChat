@@ -5,6 +5,9 @@ import secrets
 import requests as http_requests
 from datetime import datetime
 import os
+import subprocess
+import tempfile
+from flask import Response
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
@@ -234,8 +237,27 @@ def delete_message(message_id):
     try:
         db = get_db()
         cursor = db.cursor()
+        # Get room_id before marking deleted so we can broadcast
+        cursor.execute("SELECT room_id FROM messages WHERE id = %s", (message_id,))
+        row = cursor.fetchone()
+        if not row:
+            return jsonify({'status': 'error', 'message': 'Message not found'})
+        room_id = row[0]
         cursor.execute("UPDATE messages SET is_deleted = 1 WHERE id = %s", (message_id,))
         db.commit()
+        # Notify connected clients via internal bridge
+        try:
+            import urllib.request, json as _json
+            req_body = _json.dumps({'room_id': room_id, 'msg_id': message_id}).encode()
+            req = urllib.request.Request(
+                'http://127.0.0.1:8951/admin/delete',
+                data=req_body,
+                headers={'Content-Type': 'application/json'},
+                method='POST'
+            )
+            urllib.request.urlopen(req, timeout=2)
+        except Exception as be:
+            app.logger.error(f"Bridge notify failed: {be}")
         return jsonify({'status': 'ok'})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)})
@@ -451,6 +473,200 @@ def api_logs():
         return jsonify({'lines': ['Log file not found: ' + LOG_PATH]})
     except Exception as e:
         return jsonify({'lines': [f'Error reading log: {e}']})
+
+# ---------------------------------------------------------------------------
+#  Maintenance
+# ---------------------------------------------------------------------------
+
+@app.route('/maintenance')
+@require_moderator
+def maintenance():
+    try:
+        db     = get_db()
+        cursor = db.cursor()
+
+        # Table stats
+        stats = {}
+        for table in ('users', 'rooms', 'messages', 'mailbox'):
+            try:
+                cursor.execute(f"SELECT COUNT(*) FROM `{table}`")
+                stats[table] = cursor.fetchone()[0]
+            except Exception:
+                stats[table] = 'N/A'
+
+        cursor.execute("SELECT COUNT(*) FROM messages WHERE is_deleted = 1")
+        stats['deleted_messages'] = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM messages WHERE is_deleted = 0")
+        stats['active_messages'] = cursor.fetchone()[0]
+
+        # List backups
+        backup_dir = '/opt/scenechat/backups'
+        os.makedirs(backup_dir, exist_ok=True)
+        backups = []
+        for f in sorted(os.listdir(backup_dir), reverse=True):
+            if f.endswith('.sql'):
+                path = os.path.join(backup_dir, f)
+                size = os.path.getsize(path)
+                mtime = datetime.fromtimestamp(os.path.getmtime(path)).strftime('%Y-%m-%d %H:%M')
+                backups.append({'name': f, 'size': size, 'mtime': mtime})
+
+        return render_template('maintenance.html', stats=stats, backups=backups)
+    except Exception as e:
+        flash(f'Error: {e}')
+        return render_template('maintenance.html', stats={}, backups=[])
+    finally:
+        try: cursor.close()
+        except: pass
+        try: db.close()
+        except: pass
+
+
+@app.route('/maintenance/backup', methods=['POST'])
+@require_moderator
+def db_backup():
+    backup_dir = '/opt/scenechat/backups'
+    os.makedirs(backup_dir, exist_ok=True)
+    filename = f"scenechat_{datetime.now().strftime('%Y%m%d_%H%M%S')}.sql"
+    filepath = os.path.join(backup_dir, filename)
+    try:
+        result = subprocess.run([
+            'mysqldump',
+            '-h', DB_CONFIG['host'],
+            '-u', DB_CONFIG['user'],
+            f"-p{DB_CONFIG['password']}",
+            DB_CONFIG['database']
+        ], capture_output=True, text=True, timeout=60)
+        if result.returncode != 0:
+            flash(f'Backup failed: {result.stderr}')
+            return redirect(url_for('maintenance'))
+        with open(filepath, 'w') as f:
+            f.write(result.stdout)
+        flash(f'Backup saved: {filename}')
+    except Exception as e:
+        flash(f'Backup error: {e}')
+    return redirect(url_for('maintenance'))
+
+
+@app.route('/maintenance/backup/download/<filename>')
+@require_moderator
+def db_backup_download(filename):
+    backup_dir = '/opt/scenechat/backups'
+    safe = os.path.basename(filename)
+    if not safe.endswith('.sql'):
+        return 'Invalid file', 400
+    return send_from_directory(backup_dir, safe, as_attachment=True)
+
+
+@app.route('/maintenance/backup/delete/<filename>', methods=['POST'])
+@require_moderator
+def db_backup_delete(filename):
+    backup_dir = '/opt/scenechat/backups'
+    safe = os.path.basename(filename)
+    if not safe.endswith('.sql'):
+        flash('Invalid file')
+        return redirect(url_for('maintenance'))
+    try:
+        os.remove(os.path.join(backup_dir, safe))
+        flash(f'Deleted backup: {safe}')
+    except Exception as e:
+        flash(f'Error: {e}')
+    return redirect(url_for('maintenance'))
+
+
+@app.route('/maintenance/restore', methods=['POST'])
+@require_moderator
+def db_restore():
+    f = request.files.get('sql_file')
+    if not f or not f.filename.endswith('.sql'):
+        flash('Please upload a valid .sql file')
+        return redirect(url_for('maintenance'))
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.sql', delete=False) as tmp:
+            f.save(tmp.name)
+            result = subprocess.run([
+                'mysql',
+                '-h', DB_CONFIG['host'],
+                '-u', DB_CONFIG['user'],
+                f"-p{DB_CONFIG['password']}",
+                DB_CONFIG['database']
+            ], stdin=open(tmp.name), capture_output=True, text=True, timeout=120)
+            os.unlink(tmp.name)
+        if result.returncode != 0:
+            flash(f'Restore failed: {result.stderr}')
+        else:
+            flash('Database restored successfully')
+    except Exception as e:
+        flash(f'Restore error: {e}')
+    return redirect(url_for('maintenance'))
+
+
+@app.route('/maintenance/purge/deleted', methods=['POST'])
+@require_moderator
+def purge_deleted_messages():
+    try:
+        db     = get_db()
+        cursor = db.cursor()
+        cursor.execute("DELETE FROM messages WHERE is_deleted = 1")
+        db.commit()
+        flash(f'Purged {cursor.rowcount} deleted messages')
+    except Exception as e:
+        flash(f'Error: {e}')
+    finally:
+        try: cursor.close()
+        except: pass
+        try: db.close()
+        except: pass
+    return redirect(url_for('maintenance'))
+
+
+@app.route('/maintenance/purge/old', methods=['POST'])
+@require_moderator
+def purge_old_messages():
+    days = int(request.form.get('days', 30))
+    try:
+        db     = get_db()
+        cursor = db.cursor()
+        cursor.execute(
+            "DELETE FROM messages WHERE sent_at < NOW() - INTERVAL %s DAY",
+            (days,)
+        )
+        db.commit()
+        flash(f'Purged {cursor.rowcount} messages older than {days} days')
+    except Exception as e:
+        flash(f'Error: {e}')
+    finally:
+        try: cursor.close()
+        except: pass
+        try: db.close()
+        except: pass
+    return redirect(url_for('maintenance'))
+
+
+@app.route('/maintenance/purge/inactive', methods=['POST'])
+@require_moderator
+def purge_inactive_users():
+    days = int(request.form.get('days', 90))
+    try:
+        db     = get_db()
+        cursor = db.cursor()
+        cursor.execute("""
+            DELETE FROM users
+            WHERE role = 'user'
+            AND (last_seen IS NULL OR last_seen < NOW() - INTERVAL %s DAY)
+            AND username != 'scene_bot'
+        """, (days,))
+        db.commit()
+        flash(f'Purged {cursor.rowcount} inactive users (>{days} days)')
+    except Exception as e:
+        flash(f'Error: {e}')
+    finally:
+        try: cursor.close()
+        except: pass
+        try: db.close()
+        except: pass
+    return redirect(url_for('maintenance'))
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8950, debug=False)

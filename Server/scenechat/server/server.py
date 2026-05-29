@@ -16,12 +16,32 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.backends import default_backend
 
 # -- Logging -------------------------------------------------------------------
+import logging.handlers
+LOG_PATH = '/opt/scenechat/logs/scenechat.log'
+LOG_MAX_BYTES  = 50 * 1024 * 1024   # 50 MB per file
+LOG_BACKUP_COUNT = 30               # 30 rotated files = 30 days at ~1 file/day
+
 os.makedirs('/opt/scenechat/logs', exist_ok=True)
-logging.basicConfig(
-    filename='/opt/scenechat/logs/scenechat.log',
-    level=logging.INFO,
-    format='%(asctime)s %(levelname)s %(message)s'
+
+_log_handler = logging.handlers.RotatingFileHandler(
+    LOG_PATH,
+    maxBytes=LOG_MAX_BYTES,
+    backupCount=LOG_BACKUP_COUNT,
+    encoding='utf-8'
 )
+_log_handler.setFormatter(logging.Formatter(
+    '%(asctime)s %(levelname)-8s %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+))
+
+logging.root.setLevel(logging.INFO)
+logging.root.addHandler(_log_handler)
+
+# Also log to stdout for systemd journal
+_console = logging.StreamHandler()
+_console.setFormatter(logging.Formatter('%(asctime)s %(levelname)-8s %(message)s', datefmt='%H:%M:%S'))
+logging.root.addHandler(_console)
+
 log = logging.getLogger('scenechat')
 
 # -- Packet types --------------------------------------------------------------
@@ -41,6 +61,7 @@ SCCP_ERROR       = 0x0D
 SCCP_PING        = 0x0E
 SCCP_PONG        = 0x0F
 SCCP_DISCONNECT  = 0x10
+SCCP_MSG_DELETE  = 0x19
 
 # -- Database configuration ----------------------------------------------------
 DB_CONFIG = {
@@ -64,6 +85,21 @@ _admin_queue = asyncio.Queue()
 # user_id -> { writer, username, session_key, room, lock }
 connected_clients = {}
 muted_users       = set()   # in-memory mute list, clears on restart
+
+# -- Deleted message broadcast -----------------------------------------------
+async def broadcast_msg_delete(room_id: int, msg_id: int):
+    payload = bytes([room_id]) + msg_id.to_bytes(4, 'big')
+    for uid, client in list(connected_clients.items()):
+        if client.get('room') == room_id:
+            try:
+                await write_encrypted(
+                    client['writer'], client['lock'],
+                    client['session_key'],
+                    SCCP_MSG_DELETE, payload
+                )
+            except Exception as e:
+                log.warning(f"delete broadcast to {uid} failed: {e}")
+    log.info(f"MSG_DELETE broadcast: room={room_id} msg_id={msg_id}")
 
 # -- scene_bot constants -------------------------------------------------------
 SCENE_BOT_ID       = 12
@@ -368,7 +404,7 @@ async def handle_join_room(writer, lock, session_key, payload, client_id):
         connected_clients[client_id]['room'] = room_id
 
         cursor.execute("""
-            SELECT u.username, m.content, m.sent_at
+            SELECT m.id, u.username, m.content, m.sent_at
             FROM messages m
             JOIN users u ON m.user_id = u.id
             WHERE m.room_id = %s AND m.is_deleted = 0
@@ -382,9 +418,10 @@ async def handle_join_room(writer, lock, session_key, payload, client_id):
         out += pack_string8(room[1])
         out += bytes([len(rows)])
         for row in rows:
-            ts   = row[2].strftime('%H:%M')
-            out += pack_string8(row[0])
-            out += pack_string16(row[1])
+            ts   = row[3].strftime('%H:%M')
+            out += int(row[0]).to_bytes(4, 'big')
+            out += pack_string8(row[1])
+            out += pack_string16(row[2])
             out += pack_string8(ts)
 
         await write_encrypted(writer, lock, session_key, SCCP_ROOM_INFO, out)
@@ -403,6 +440,7 @@ async def bot_reply(room_id: int, text: str, target_client_id: int = None):
     """Send a message from scene_bot. If target_client_id is set, DM only that client."""
     ts        = datetime.now().strftime('%H:%M')
     payload   = bytes([room_id])
+    payload  += (0).to_bytes(4, 'big')  # msg_id=0 bot msgs not in DB
     payload  += pack_string8(SCENE_BOT_USERNAME)
     payload  += pack_string16(text)
     payload  += pack_string8(ts)
@@ -576,6 +614,7 @@ async def handle_bot_command(content: str, room_id: int, client_id: int):
         # Broadcast the action as a regular message styled as emote
         ts      = datetime.now().strftime('%H:%M')
         payload = bytes([room_id])
+        payload += (0).to_bytes(4, 'big')  # msg_id=0
         payload += pack_string8(username)
         payload += pack_string16(f'* {username} {action_text}')
         payload += pack_string8(ts)
@@ -722,7 +761,7 @@ async def handle_bot_command(content: str, room_id: int, client_id: int):
         ts  = datetime.now().strftime('%H:%M')
         for uid, client in list(connected_clients.items()):
             r   = client.get('room', room_id)
-            pkt = bytes([r]) + pack_string8(SCENE_BOT_USERNAME) + pack_string16(f'[ANNOUNCE] {msg}') + pack_string8(ts)
+            pkt = bytes([r]) + (0).to_bytes(4, 'big') + pack_string8(SCENE_BOT_USERNAME) + pack_string16(f'[ANNOUNCE] {msg}') + pack_string8(ts)
             try:
                 await write_encrypted(client['writer'], client['lock'],
                                       client['session_key'], SCCP_MSG_RECV, pkt)
@@ -812,12 +851,14 @@ async def handle_message(writer, lock, session_key, payload, client_id):
             "INSERT INTO messages (room_id, user_id, content) VALUES (%s, %s, %s)",
             (room_id, client_id, content)
         )
+        msg_id   = int(cursor.lastrowid)
         db.commit()
 
         username = connected_clients[client_id]['username']
         ts       = datetime.now().strftime('%H:%M')
 
         broadcast  = bytes([room_id])
+        broadcast += msg_id.to_bytes(4, 'big')
         broadcast += pack_string8(username)
         broadcast += pack_string16(content)
         broadcast += pack_string8(ts)
@@ -967,6 +1008,7 @@ async def admin_broadcast(room_id, content):
             pass
 
     broadcast  = bytes([room_id])
+    broadcast += (0).to_bytes(4, 'big')  # msg_id=0 admin broadcast
     broadcast += pack_string8(username)
     broadcast += pack_string16(content)
     broadcast += pack_string8(ts)
@@ -1000,13 +1042,19 @@ async def _handle_admin_http(reader, writer):
         method = parts[0] if len(parts) > 0 else ''
         path   = parts[1] if len(parts) > 1 else ''
 
+        sep  = '\r\n\r\n' if '\r\n\r\n' in text else '\n\n'
+        body = text.split(sep, 1)[1] if sep in text else ''
+
         if method == 'POST' and path == '/admin/send':
-            sep   = '\r\n\r\n' if '\r\n\r\n' in text else '\n\n'
-            body  = text.split(sep, 1)[1] if sep in text else ''
             data  = _json.loads(body)
             ok, msg = await admin_broadcast(int(data['room_id']), str(data['content']))
             resp_body = _json.dumps({'ok': ok, 'msg': msg})
             status    = '200 OK' if ok else '400 Bad Request'
+        elif method == 'POST' and path == '/admin/delete':
+            data = _json.loads(body)
+            await broadcast_msg_delete(int(data['room_id']), int(data['msg_id']))
+            resp_body = _json.dumps({'ok': True})
+            status    = '200 OK'
         else:
             resp_body = _json.dumps({'ok': False, 'msg': 'Not found'})
             status    = '404 Not Found'

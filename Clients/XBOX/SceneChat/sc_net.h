@@ -44,6 +44,7 @@ extern "C" {
 #define SCCP_PING           0x0E
 #define SCCP_PONG           0x0F
 #define SCCP_DISCONNECT     0x10
+#define SCCP_MSG_DELETE     0x19
 
 /* ── Constants ────────────────────────────────────────────────────────────── */
 #define SC_SERVER_PORT       8943
@@ -144,6 +145,8 @@ extern "C" {
     int SC_Net_RecvRoomInfo(SC_RoomInfo* pOut);
     int SC_Net_RecvMessage(SC_Message* pOut);
     int SC_Net_RecvError(char* buf, int bufLen);
+    int SC_Net_RecvMessageEx(SC_Message* pOut, unsigned int* pMsgId);
+    int SC_Net_RecvMsgDelete(unsigned char* pRoomId, unsigned int* pMsgId);
 
     /* ── Crypto (internal -- exposed for unit testing) ────────────────────────── */
     /*
