@@ -677,7 +677,7 @@ async def handle_bot_command(content: str, room_id: int, client_id: int):
     # -- /version --------------------------------------------------------------
     if cmd == '/version':
         await bot_reply(room_id,
-            '[scene_bot] SceneChat Server v1.0 | Protocol SCCP | Team Resurgent / Darkone83',
+            '[scene_bot] SceneChat Server v1.2 | Protocol SCCP | Team Resurgent / Darkone83',
             client_id)
         return True
 
