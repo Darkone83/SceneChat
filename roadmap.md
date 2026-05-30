@@ -80,7 +80,7 @@ Dashboard description: "SceneChat — Private encrypted Xbox chat"
 | 1.2 | 2026-05-29 | Access control | `access_level` on `rooms` |
 | 1.3 | Planned | DMs | `type` on `rooms`, `room_participants` table |
 | 1.3 | Planned | Mailbox | `mailbox` table |
-
+| 1.4 | TBD | Video Chat | TBD |
 ---
 
 ## v1.4 — Video Chat
