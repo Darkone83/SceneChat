@@ -1,0 +1,69 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1 class="page-title">Online Users</h1>
+
+<div class="card" style="padding:0;">
+    <div style="padding:12px 16px; border-bottom:1px solid #222; display:flex; justify-content:space-between; align-items:center;">
+        <span id="stat-online" style="color:#39ff14; font-size:0.9em;">Loading...</span>
+        <label style="color:#555; font-size:0.85em; display:flex; align-items:center; gap:6px; cursor:pointer;">
+            <input type="checkbox" id="auto-refresh" checked onchange="toggleRefresh()">
+            Auto-refresh
+        </label>
+    </div>
+    <table id="online-table">
+        <thead>
+            <tr>
+                <th>User ID</th>
+                <th>Username</th>
+                <th>Current Room</th>
+            </tr>
+        </thead>
+        <tbody id="online-body">
+            <tr><td colspan="3" style="color:#555; text-align:center;">Loading...</td></tr>
+        </tbody>
+    </table>
+</div>
+
+<script>
+let _timer = null;
+
+function fetchOnline() {
+    fetch('/api/online')
+        .then(r => r.json())
+        .then(data => {
+            const users = data.users || [];
+            const tbody = document.getElementById('online-body');
+            document.getElementById('stat-online').textContent =
+                `${users.length} user${users.length !== 1 ? 's' : ''} connected`;
+
+            if (users.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="3" style="color:#555; text-align:center;">Nobody connected</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = users.map(u => `
+                <tr>
+                    <td style="color:#555;">${u.user_id}</td>
+                    <td>${u.username}</td>
+                    <td style="color:#555;">${u.room !== null ? 'Room ' + u.room : '&mdash;'}</td>
+                </tr>
+            `).join('');
+        })
+        .catch(() => {
+            document.getElementById('stat-online').textContent = 'Error fetching data';
+        });
+}
+
+function toggleRefresh() {
+    if (document.getElementById('auto-refresh').checked) {
+        _timer = setInterval(fetchOnline, 3000);
+    } else {
+        clearInterval(_timer);
+        _timer = null;
+    }
+}
+
+fetchOnline();
+_timer = setInterval(fetchOnline, 3000);
+</script>
+{% endblock %}

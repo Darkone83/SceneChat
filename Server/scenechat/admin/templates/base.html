@@ -221,6 +221,7 @@
     		<span style="color: #333; margin-left: 24px; font-size: 0.85em;">{{ session.display_name }}</span>
     		<a href="{{ url_for('logs') }}" {% if request.endpoint == 'logs' %}class="active"{% endif %}>Logs</a>
 		<a href="{{ url_for('maintenance') }}" {% if request.endpoint == 'maintenance' %}class="active"{% endif %}>Maintenance</a>
+		<a href="{{ url_for('online_users') }}" {% if request.endpoint == 'online_users' %}class="active"{% endif %}>Online</a>
     		<a href="{{ url_for('logout') }}">Logout</a>
 		</div>    
 	</nav>

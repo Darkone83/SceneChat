@@ -25,6 +25,9 @@ public static class ScProtocol
     public const byte PONG = 0x0F;
     public const byte DISCONNECT = 0x10;
     public const byte MSG_DELETE = 0x19;
+    public const byte USER_LIST = 0x11;
+    public const byte USER_JOIN = 0x12;
+    public const byte USER_LEAVE = 0x13;
 
     // ── String packing (matches server.py pack_string8/16) ──────────────────
 

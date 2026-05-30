@@ -1,6 +1,6 @@
 # SceneChat — Python Client
 
-A PySide6 desktop client for SceneChat. Connects to the same server as the Xbox client using the identical SCCP protocol.
+A PySide6 desktop client for SceneChat. Connects to the same server as the Xbox and WPF clients using the identical SCCP protocol.
 
 **Team Resurgent / Darkone83**
 
@@ -8,7 +8,7 @@ A PySide6 desktop client for SceneChat. Connects to the same server as the Xbox 
 
 ## Requirements
 
-- Python 3.8 or newer
+- Python 3.10 or newer
 - That's it — all other dependencies install automatically on first run
 
 ---
@@ -50,8 +50,12 @@ Two files are created on first use:
 - Full DH + ChaCha20-Poly1305 encrypted connection — same security as the Xbox client
 - Login and registration
 - Multi-room chat with real-time messages
+- Real-time deleted message sync — messages deleted by an admin disappear instantly
 - Inline emoji rendering — type `:smile:` `:fire:` etc.
 - Emoji picker (click 😊 in the input bar)
+- Password protected rooms — prompted on join
+- ACL rooms — only visible to users with sufficient role
+- Online users panel — live list of connected users and their current room, updates in real time
 - Auto-login from saved credentials
 - Logout clears saved credentials
 
@@ -60,3 +64,5 @@ Two files are created on first use:
 ## Notes
 
 Emoji are downloaded from the admin panel on port 8950 of your server. If the admin panel is not running or the port is blocked, emoji will render as `:token:` text instead of images — chat still works normally.
+
+Room access is enforced server-side. If you cannot see a room, you do not have the required role. If a room shows `*` it requires a password to join.

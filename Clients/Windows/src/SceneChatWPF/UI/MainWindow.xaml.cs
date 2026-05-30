@@ -15,7 +15,9 @@ public partial class MainWindow : Window
 {
     private ChatClient? _client;
     private int _currentRoomId = -1;
-    private readonly Dictionary<int, Paragraph> _msgParagraphs = new(); // msgId -> Paragraph
+    private int _myUserId = 0;
+    private readonly Dictionary<int, Paragraph> _msgParagraphs = new();
+    private readonly Dictionary<int, UserInfo> _onlineUsers = new(); // msgId -> Paragraph
     private bool _doRegister;
     private string _pendingUser = "";
     private string _pendingPass = "";
@@ -110,6 +112,7 @@ public partial class MainWindow : Window
 
         _client.OnAuthOk += (userId, uname, token) => Dispatcher.Invoke(() =>
         {
+            _myUserId = userId;
             if (_doRegister && userId == 0)
             {
                 _doRegister = false;
@@ -137,15 +140,55 @@ public partial class MainWindow : Window
         {
             RoomListBox.Items.Clear();
             foreach (var r in rooms)
-                RoomListBox.Items.Add(new RoomItem(r.Id, r.Name, r.Type));
-            // Auto-join first text room
-            var first = rooms.FirstOrDefault(r => r.Type == 0);
-            if (first != null) _ = _client.JoinRoomAsync(first.Id);
+            {
+                var label = (r.PasswordFlag > 0 ? "* " : "") +
+                            (r.Type == 1 ? "[voice] " : "# ") + r.Name;
+                RoomListBox.Items.Add(new RoomItem(r.Id, label, r.Type, r.PasswordFlag));
+            }
+            // No auto-join -- user selects from list
+            RefreshUserList(); // Re-resolve room names now that rooms are loaded
+        });
+
+        _client.OnJoinFail += reason => Dispatcher.Invoke(() =>
+        {
+            if (reason == "Wrong password")
+            {
+                var pw = Microsoft.VisualBasic.Interaction.InputBox(
+                    "Wrong password. Try again:", "Password Required", "");
+                if (!string.IsNullOrEmpty(pw) && _client != null)
+                    _ = _client.JoinRoomAsync(_currentRoomId, pw);
+            }
+            else SetChatStatus($"Join failed: {reason}");
+        });
+
+        _client.OnUserList += users => Dispatcher.Invoke(() =>
+        {
+            _onlineUsers.Clear();
+            foreach (var u in users) _onlineUsers[u.UserId] = u;
+            RefreshUserList();
+        });
+
+        _client.OnUserJoin += user => Dispatcher.Invoke(() =>
+        {
+            _onlineUsers[user.UserId] = user;
+            RefreshUserList();
+        });
+
+        _client.OnUserLeave += (userId, _) => Dispatcher.Invoke(() =>
+        {
+            _onlineUsers.Remove(userId);
+            RefreshUserList();
         });
 
         _client.OnRoomJoined += (roomId, name, history) => Dispatcher.Invoke(() =>
         {
             _currentRoomId = roomId;
+            // Update own presence room
+            if (_myUserId > 0 && _onlineUsers.TryGetValue(_myUserId, out var me))
+            {
+                _onlineUsers[_myUserId] = me with { RoomId = roomId };
+                RefreshUserList();
+            }
             TxtRoomName.Text = $"# {name}";
             FeedBox.Document.Blocks.Clear();
             _msgParagraphs.Clear();
@@ -251,6 +294,25 @@ public partial class MainWindow : Window
             para.Inlines.Add(new Run(content[pos..]) { Foreground = BrText });
     }
 
+    // ── Online users ──────────────────────────────────────────────────────────
+
+    private void RefreshUserList()
+    {
+        OnlineListBox.Items.Clear();
+        foreach (var u in _onlineUsers.Values)
+        {
+            // Try to find room name
+            string roomName = "?";
+            foreach (RoomItem ri in RoomListBox.Items)
+            {
+                if (ri.Id == u.RoomId) { roomName = ri.Name; break; }
+            }
+            OnlineListBox.Items.Add($"● {u.Username}  #{roomName}");
+        }
+    }
+
+    private void SetChatStatus(string msg) => SetStatus(msg);
+
     // ── Emoji download ────────────────────────────────────────────────────────
 
     private static readonly string[] EmojiNames =
@@ -284,7 +346,17 @@ public partial class MainWindow : Window
     private void RoomListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (RoomListBox.SelectedItem is RoomItem room && room.Id != _currentRoomId)
-            _ = _client?.JoinRoomAsync(room.Id);
+        {
+            if (room.PasswordFlag > 0)
+            {
+                var pw = Microsoft.VisualBasic.Interaction.InputBox(
+                    $"Enter password for {room.Name}:", "Password Required", "");
+                if (!string.IsNullOrEmpty(pw))
+                    _ = _client?.JoinRoomAsync(room.Id, pw);
+            }
+            else
+                _ = _client?.JoinRoomAsync(room.Id);
+        }
     }
 
     // ── Input bar ─────────────────────────────────────────────────────────────
@@ -371,8 +443,11 @@ public class RoomItem
     public int Id { get; }
     public string Name { get; }
     public int Type { get; }
-    public string DisplayName => (Type == 1 ? "🔊 " : "# ") + Name;
+    public int PasswordFlag { get; }
+    public string DisplayName => Name;
 
-    public RoomItem(int id, string name, int type)
-    { Id = id; Name = name; Type = type; }
+    public RoomItem(int id, string name, int type, int passwordFlag = 0)
+    { Id = id; Name = name; Type = type; PasswordFlag = passwordFlag; }
+
+    public override string ToString() => Name;
 }

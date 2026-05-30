@@ -32,6 +32,9 @@ SCCP_ROOM_INFO   = 0x09
 SCCP_MESSAGE     = 0x0A
 SCCP_MSG_RECV    = 0x0B
 SCCP_MSG_DELETE  = 0x19
+SCCP_USER_LIST   = 0x11
+SCCP_USER_JOIN   = 0x12
+SCCP_USER_LEAVE  = 0x13
 SCCP_HISTORY     = 0x0C
 SCCP_ERROR       = 0x0D
 SCCP_PING        = 0x0E
@@ -153,6 +156,10 @@ class ChatWorker(QThread):
     sig_room_joined  = Signal(int, str, list)
     sig_message      = Signal(int, str, str, str, int)  # room_id, user, content, ts, msg_id
     sig_msg_delete   = Signal(int, int)                 # room_id, msg_id
+    sig_user_list    = Signal(list)                      # list of (user_id, username, room_id)
+    sig_user_join    = Signal(int, str, int)             # user_id, username, room_id
+    sig_user_leave   = Signal(int, str)                  # user_id, username
+    sig_join_fail    = Signal(str)                       # reason string
     sig_error        = Signal(str)
     sig_disconnected = Signal(str)
 
@@ -166,6 +173,7 @@ class ChatWorker(QThread):
         self._stop             = False
         self._pending          = []
         self._pending_register = False
+        self._joining_room     = False
 
     def configure(self, server: str, port: int = 8943):
         self._server = server
@@ -177,8 +185,8 @@ class ChatWorker(QThread):
     def send_register(self, username: str, password: str):
         self._schedule(self._do_register, username, password)
 
-    def send_join_room(self, room_id: int):
-        self._schedule(self._do_join_room, room_id)
+    def send_join_room(self, room_id: int, password: str = ''):
+        self._schedule(self._do_join_room, room_id, password)
 
     def send_message(self, room_id: int, content: str):
         self._schedule(self._do_send_message, room_id, content)
@@ -296,7 +304,15 @@ class ChatWorker(QThread):
     async def _dispatch(self, pkt_type: int, payload: bytes, writer):
         if pkt_type == SCCP_AUTH_OK:
             await self._on_auth_ok(payload)
-        elif pkt_type in (SCCP_AUTH_FAIL, SCCP_ERROR):
+        elif pkt_type == SCCP_AUTH_FAIL:
+            msg, _ = _unpack_string8(payload, 0)
+            # Distinguish login fail from join fail
+            if self._joining_room:
+                self._joining_room = False
+                self.sig_join_fail.emit(msg)
+            else:
+                self.sig_auth_fail.emit(msg)
+        elif pkt_type == SCCP_ERROR:
             msg, _ = _unpack_string8(payload, 0)
             self.sig_auth_fail.emit(msg)
         elif pkt_type == SCCP_ROOM_LIST:
@@ -307,6 +323,12 @@ class ChatWorker(QThread):
             self._on_msg_recv(payload)
         elif pkt_type == SCCP_MSG_DELETE:
             self._on_msg_delete(payload)
+        elif pkt_type == SCCP_USER_LIST:
+            self._on_user_list(payload)
+        elif pkt_type == SCCP_USER_JOIN:
+            self._on_user_join(payload)
+        elif pkt_type == SCCP_USER_LEAVE:
+            self._on_user_leave(payload)
         elif pkt_type == SCCP_PONG:
             pass
 
@@ -330,15 +352,17 @@ class ChatWorker(QThread):
             count = payload[0]; pos = 1
             rooms = []
             for _ in range(count):
-                room_id   = payload[pos]; pos += 1
-                room_type = payload[pos]; pos += 1
-                name, pos = _unpack_string8(payload, pos)
-                rooms.append((room_id, name, room_type))
+                room_id       = payload[pos]; pos += 1
+                room_type     = payload[pos]; pos += 1
+                password_flag = payload[pos]; pos += 1
+                name, pos     = _unpack_string8(payload, pos)
+                rooms.append((room_id, name, room_type, password_flag))
             self.sig_room_list.emit(rooms)
         except Exception as e:
             self.sig_error.emit(f'ROOM_LIST parse error: {e}')
 
     def _on_room_info(self, payload: bytes):
+        self._joining_room = False
         try:
             pos     = 0
             room_id = payload[pos]; pos += 1
@@ -376,6 +400,38 @@ class ChatWorker(QThread):
         except Exception as e:
             self.sig_error.emit(f'MSG_DELETE parse error: {e}')
 
+    def _on_user_list(self, payload: bytes):
+        try:
+            count = payload[0]; pos = 1
+            users = []
+            for _ in range(count):
+                user_id  = struct.unpack_from('>I', payload, pos)[0]; pos += 4
+                username, pos = _unpack_string8(payload, pos)
+                room_id  = payload[pos]; pos += 1
+                users.append((user_id, username, room_id))
+            self.sig_user_list.emit(users)
+        except Exception as e:
+            self.sig_error.emit(f'USER_LIST parse error: {e}')
+
+    def _on_user_join(self, payload: bytes):
+        try:
+            pos = 0
+            user_id  = struct.unpack_from('>I', payload, pos)[0]; pos += 4
+            username, pos = _unpack_string8(payload, pos)
+            room_id  = payload[pos]
+            self.sig_user_join.emit(user_id, username, room_id)
+        except Exception as e:
+            self.sig_error.emit(f'USER_JOIN parse error: {e}')
+
+    def _on_user_leave(self, payload: bytes):
+        try:
+            pos = 0
+            user_id  = struct.unpack_from('>I', payload, pos)[0]; pos += 4
+            username, _ = _unpack_string8(payload, pos)
+            self.sig_user_leave.emit(user_id, username)
+        except Exception as e:
+            self.sig_error.emit(f'USER_LEAVE parse error: {e}')
+
     # ── Send ──────────────────────────────────────────────────────────────────
 
     async def _do_login(self, username: str, password: str):
@@ -388,8 +444,11 @@ class ChatWorker(QThread):
         payload = _pack_string8(username) + _pack_string8(password)
         await _write_encrypted(self._writer, self._session_key, SCCP_REGISTER, payload)
 
-    async def _do_join_room(self, room_id: int):
-        await _write_encrypted(self._writer, self._session_key, SCCP_JOIN_ROOM, bytes([room_id]))
+    async def _do_join_room(self, room_id: int, password: str = ''):
+        self._joining_room = True
+        pw_bytes = password.encode('utf-8')[:64]
+        payload  = bytes([room_id, len(pw_bytes)]) + pw_bytes
+        await _write_encrypted(self._writer, self._session_key, SCCP_JOIN_ROOM, payload)
 
     async def _do_send_message(self, room_id: int, content: str):
         payload = bytes([room_id]) + _pack_string16(content)

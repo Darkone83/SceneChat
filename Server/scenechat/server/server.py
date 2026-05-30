@@ -62,6 +62,9 @@ SCCP_PING        = 0x0E
 SCCP_PONG        = 0x0F
 SCCP_DISCONNECT  = 0x10
 SCCP_MSG_DELETE  = 0x19
+SCCP_USER_LIST   = 0x11
+SCCP_USER_JOIN   = 0x12
+SCCP_USER_LEAVE  = 0x13
 
 # -- Database configuration ----------------------------------------------------
 DB_CONFIG = {
@@ -86,6 +89,48 @@ _admin_queue = asyncio.Queue()
 connected_clients = {}
 muted_users       = set()   # in-memory mute list, clears on restart
 
+# -- User presence helpers ---------------------------------------------------
+def get_caller_role(client_id):
+    """Return role string for a connected client, default user."""
+    try:
+        db     = get_db()
+        cursor = db.cursor()
+        cursor.execute("SELECT role FROM users WHERE id = %s", (client_id,))
+        row = cursor.fetchone()
+        return row[0] if row else 'user'
+    except Exception:
+        return 'user'
+    finally:
+        try: cursor.close()
+        except: pass
+        try: db.close()
+        except: pass
+
+async def broadcast_user_join(client_id: int, username: str, room_id):
+    """Broadcast SCCP_USER_JOIN to all connected clients."""
+    payload  = struct.pack('>I', client_id)
+    payload += pack_string8(username)
+    payload += bytes([room_id if room_id else 0])
+    for uid, client in list(connected_clients.items()):
+        if uid != client_id:
+            try:
+                await write_encrypted(client['writer'], client['lock'],
+                                      client['session_key'], SCCP_USER_JOIN, payload)
+            except Exception:
+                pass
+
+async def broadcast_user_leave(client_id: int, username: str):
+    """Broadcast SCCP_USER_LEAVE to all connected clients."""
+    payload  = struct.pack('>I', client_id)
+    payload += pack_string8(username)
+    for uid, client in list(connected_clients.items()):
+        if uid != client_id:
+            try:
+                await write_encrypted(client['writer'], client['lock'],
+                                      client['session_key'], SCCP_USER_LEAVE, payload)
+            except Exception:
+                pass
+
 # -- Deleted message broadcast -----------------------------------------------
 async def broadcast_msg_delete(room_id: int, msg_id: int):
     payload = bytes([room_id]) + msg_id.to_bytes(4, 'big')
@@ -100,6 +145,17 @@ async def broadcast_msg_delete(room_id: int, msg_id: int):
             except Exception as e:
                 log.warning(f"delete broadcast to {uid} failed: {e}")
     log.info(f"MSG_DELETE broadcast: room={room_id} msg_id={msg_id}")
+
+# -- User list helper ---------------------------------------------------------
+async def send_user_list(writer, lock, session_key):
+    """Send SCCP_USER_LIST of all currently connected clients."""
+    payload = bytes([len(connected_clients)])
+    for uid, c in connected_clients.items():
+        room_id = c.get('room') or 0
+        payload += struct.pack('>I', uid)
+        payload += pack_string8(c['username'])
+        payload += bytes([room_id])
+    await write_encrypted(writer, lock, session_key, SCCP_USER_LIST, payload)
 
 # -- scene_bot constants -------------------------------------------------------
 SCENE_BOT_ID       = 12
@@ -116,7 +172,17 @@ EMOJI_LIST = [
 
 # -- Database ------------------------------------------------------------------
 def get_db():
-    return mysql.connector.connect(**DB_CONFIG)
+    """Get a DB connection with auto-reconnect on stale connection."""
+    for attempt in range(3):
+        try:
+            conn = mysql.connector.connect(**DB_CONFIG)
+            conn.ping(reconnect=True, attempts=3, delay=1)
+            return conn
+        except mysql.connector.Error as e:
+            log.warning(f"DB connect attempt {attempt+1} failed: {e}")
+            if attempt == 2:
+                raise
+            import time; time.sleep(1)
 
 # -- Crypto --------------------------------------------------------------------
 def derive_key(shared_secret):
@@ -360,19 +426,39 @@ async def handle_login(writer, lock, session_key, payload):
         cursor.close()
         db.close()
 
-async def handle_room_list(writer, lock, session_key):
+async def handle_room_list(writer, lock, session_key, client_id=None):
     try:
         db     = get_db()
         cursor = db.cursor()
-        cursor.execute("SELECT id, name, type FROM rooms ORDER BY type, name")
+        cursor.execute(
+            "SELECT id, name, type, password_hash, access_level FROM rooms ORDER BY type, name"
+        )
         rows = cursor.fetchall()
-        log.debug(f"room_list: {len(rows)} rooms")
 
-        # [count 1B] then per room: [id 1B][type 1B][name]
-        payload = bytes([len(rows)])
+        # Determine caller role for ACL filtering
+        caller_role = get_caller_role(client_id) if client_id else 'user'
+        is_mod   = caller_role in ('moderator', 'admin')
+        is_admin = caller_role == 'admin'
+
+        # Filter rooms by access_level
+        visible = []
         for row in rows:
+            acl = row[4]  # access_level
+            if acl == 'public':
+                visible.append(row)
+            elif acl == 'moderator' and (is_mod or is_admin):
+                visible.append(row)
+            elif acl == 'admin' and is_admin:
+                visible.append(row)
+
+        log.debug(f"room_list: {len(visible)}/{len(rows)} rooms visible to role={caller_role}")
+
+        # [count 1B] per room: [id 1B][type 1B][password_flag 1B][name str8]
+        payload = bytes([len(visible)])
+        for row in visible:
             room_type = 0x01 if row[2] == 'voice' else 0x00
-            payload  += bytes([row[0], room_type]) + pack_string8(row[1])
+            pass_flag = 0x01 if row[3] else 0x00
+            payload  += bytes([row[0], room_type, pass_flag]) + pack_string8(row[1])
 
         await write_encrypted(writer, lock, session_key, SCCP_ROOM_LIST, payload)
 
@@ -388,20 +474,56 @@ async def handle_join_room(writer, lock, session_key, payload, client_id):
         await send_error(writer, lock, session_key, 'Not authenticated')
         return
 
-    room_id = payload[0]
+    pos     = 0
+    room_id = payload[pos]; pos += 1
+    # v1.2: optional password field [pass_len 1B][password]
+    password = ''
+    if len(payload) > 1:
+        pass_len = payload[pos]; pos += 1
+        if pass_len > 0:
+            password = payload[pos:pos+pass_len].decode('utf-8', errors='replace')
+
     log.info(f"JOIN_ROOM: client={client_id} room={room_id}")
 
     try:
         db     = get_db()
         cursor = db.cursor()
 
-        cursor.execute("SELECT id, name, type FROM rooms WHERE id = %s", (room_id,))
+        cursor.execute(
+            "SELECT id, name, type, password_hash, access_level FROM rooms WHERE id = %s",
+            (room_id,)
+        )
         room = cursor.fetchone()
         if not room:
             await send_error(writer, lock, session_key, 'Room not found')
             return
 
+        # Check access level
+        caller_role = get_caller_role(client_id)
+        is_mod   = caller_role in ('moderator', 'admin')
+        is_admin = caller_role == 'admin'
+        acl = room[4]
+        if acl == 'moderator' and not (is_mod or is_admin):
+            await write_encrypted(writer, lock, session_key, SCCP_AUTH_FAIL,
+                                  pack_string8('Access denied'))
+            return
+        if acl == 'admin' and not is_admin:
+            await write_encrypted(writer, lock, session_key, SCCP_AUTH_FAIL,
+                                  pack_string8('Access denied'))
+            return
+
+        # Check password
+        if room[3]:  # password_hash set
+            if not password or not bcrypt.checkpw(
+                password.encode('utf-8'), room[3].encode('utf-8')):
+                await write_encrypted(writer, lock, session_key, SCCP_AUTH_FAIL,
+                                      pack_string8('Wrong password'))
+                return
+
         connected_clients[client_id]['room'] = room_id
+        # Broadcast updated presence to all clients
+        username = connected_clients[client_id]['username']
+        await broadcast_user_join(client_id, username, room_id)
 
         cursor.execute("""
             SELECT m.id, u.username, m.content, m.sent_at
@@ -923,9 +1045,12 @@ async def handle_client(reader, writer):
                         'session_key': session_key,
                         'room':        None
                     }
+                    # Broadcast join to all other clients
+                    await broadcast_user_join(client_id, username, None)
 
             elif pkt_type == SCCP_ROOM_LIST:
-                await handle_room_list(writer, lock, session_key)
+                await send_user_list(writer, lock, session_key)
+                await handle_room_list(writer, lock, session_key, client_id)
 
             elif pkt_type == SCCP_JOIN_ROOM:
                 await handle_join_room(writer, lock, session_key, payload, client_id)
@@ -962,7 +1087,10 @@ async def handle_client(reader, writer):
                 except: pass
                 try: db.close()
                 except: pass
+            # Broadcast leave to remaining clients
+            _username = connected_clients[client_id].get('username', '')
             del connected_clients[client_id]
+            await broadcast_user_leave(client_id, _username)
         log.info(f"Disconnected: {addr}")
         writer.close()
 
@@ -1054,6 +1182,16 @@ async def _handle_admin_http(reader, writer):
             data = _json.loads(body)
             await broadcast_msg_delete(int(data['room_id']), int(data['msg_id']))
             resp_body = _json.dumps({'ok': True})
+            status    = '200 OK'
+        elif method == 'GET' and path == '/admin/online':
+            users = []
+            for uid, c in connected_clients.items():
+                users.append({
+                    'user_id':  uid,
+                    'username': c['username'],
+                    'room':     c.get('room')
+                })
+            resp_body = _json.dumps({'users': users})
             status    = '200 OK'
         else:
             resp_body = _json.dumps({'ok': False, 'msg': 'Not found'})

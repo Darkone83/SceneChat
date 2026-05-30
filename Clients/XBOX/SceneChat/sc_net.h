@@ -45,6 +45,9 @@ extern "C" {
 #define SCCP_PONG           0x0F
 #define SCCP_DISCONNECT     0x10
 #define SCCP_MSG_DELETE     0x19
+#define SCCP_USER_LIST      0x11
+#define SCCP_USER_JOIN      0x12
+#define SCCP_USER_LEAVE     0x13
 
 /* ── Constants ────────────────────────────────────────────────────────────── */
 #define SC_SERVER_PORT       8943
@@ -58,7 +61,8 @@ extern "C" {
 #define SC_CHACHA_KEY_LEN    32
 #define SC_CHACHA_NONCE_LEN  12
 #define SC_POLY_TAG_LEN      16
-#define SC_PACKET_QUEUE_SIZE 16
+#define SC_PACKET_QUEUE_SIZE 32  /* increased for v1.2 presence packets */
+#define SC_MAX_USERS         64   /* max online users tracked          */
 
 /* ── Connect states ───────────────────────────────────────────────────────── */
 #define SC_STATE_IDLE        0
@@ -79,8 +83,17 @@ extern "C" {
     {
         unsigned char id;
         unsigned char type;                 /* 0=text  1=voice               */
+        unsigned char password_flag;         /* 1=password required           */
         char          name[SC_MAX_USERNAME];
     } SC_Room;
+
+    /* ── Online user descriptor ──────────────────────────────────────────────── */
+    typedef struct
+    {
+        unsigned int  user_id;
+        unsigned char room_id;               /* 0=not in a room               */
+        char          username[SC_MAX_USERNAME];
+    } SC_User;
 
     /* ── Message descriptor ───────────────────────────────────────────────────── */
     typedef struct
@@ -134,7 +147,7 @@ extern "C" {
     int SC_Net_SendRegister(const char* username, const char* password);
     int SC_Net_SendLogin(const char* username, const char* password);
     int SC_Net_SendRoomList(void);
-    int SC_Net_SendJoinRoom(unsigned char room_id);
+    int SC_Net_SendJoinRoom(unsigned char room_id, const char* password);
     int SC_Net_SendMessage(unsigned char room_id, const char* content);
     int SC_Net_SendPing(void);
 
@@ -147,6 +160,12 @@ extern "C" {
     int SC_Net_RecvError(char* buf, int bufLen);
     int SC_Net_RecvMessageEx(SC_Message* pOut, unsigned int* pMsgId);
     int SC_Net_RecvMsgDelete(unsigned char* pRoomId, unsigned int* pMsgId);
+    /* v1.2 -- online presence */
+    int SC_Net_RecvUserList(SC_User* users, int* count);
+    int SC_Net_RecvUserJoin(SC_User* pOut);
+    int SC_Net_RecvUserLeave(unsigned int* pUserId, char* username, int bufLen);
+    /* Returns 1 if server rejected a room join (wrong password or access denied) */
+    int SC_Net_RecvJoinFail(char* reason, int bufLen);
 
     /* ── Crypto (internal -- exposed for unit testing) ────────────────────────── */
     /*

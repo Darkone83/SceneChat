@@ -13,8 +13,9 @@ namespace SceneChatWPF.Net;
 
 // ── Event data ────────────────────────────────────────────────────────────────
 
-public record RoomInfo(int Id, string Name, int Type);
+public record RoomInfo(int Id, string Name, int Type, int PasswordFlag = 0);
 public record ChatMessage(int RoomId, string Username, string Content, string Timestamp, int MsgId = 0);
+public record UserInfo(int UserId, string Username, int RoomId);
 public record HistoryMessage(string Username, string Content, string Timestamp, int MsgId = 0);
 
 // ── Client ────────────────────────────────────────────────────────────────────
@@ -31,9 +32,14 @@ public class ChatClient : IAsyncDisposable
     public event Action<string>? OnDisconnected;
     public event Action<string>? OnError;
     public event Action<int, int>? OnMsgDelete;       // roomId, msgId
+    public event Action<List<UserInfo>>? OnUserList;
+    public event Action<UserInfo>? OnUserJoin;
+    public event Action<int, string>? OnUserLeave;       // userId, username
+    public event Action<string>? OnJoinFail;        // reason
 
     // ── State ─────────────────────────────────────────────────────────────────
     private TcpClient? _tcp;
+    private bool _joiningRoom;
     private NetworkStream? _stream;
     private byte[]? _sessionKey;
     private CancellationTokenSource _cts = new();
@@ -303,12 +309,15 @@ public class ChatClient : IAsyncDisposable
         switch (type)
         {
             case ScProtocol.AUTH_OK: HandleAuthOk(payload); break;
-            case ScProtocol.AUTH_FAIL:
+            case ScProtocol.AUTH_FAIL: HandleAuthFail(payload); break;
             case ScProtocol.ERROR: HandleAuthFail(payload); break;
             case ScProtocol.ROOM_LIST: HandleRoomList(payload); break;
             case ScProtocol.ROOM_INFO: HandleRoomInfo(payload); break;
             case ScProtocol.MSG_RECV: HandleMsgRecv(payload); break;
             case ScProtocol.MSG_DELETE: HandleMsgDelete(payload); break;
+            case ScProtocol.USER_LIST: HandleUserList(payload); break;
+            case ScProtocol.USER_JOIN: HandleUserJoin(payload); break;
+            case ScProtocol.USER_LEAVE: HandleUserLeave(payload); break;
             case ScProtocol.PONG: break;
         }
         return Task.CompletedTask;
@@ -335,12 +344,6 @@ public class ChatClient : IAsyncDisposable
         _ = RequestRoomListAsync();
     }
 
-    private void HandleAuthFail(byte[] payload)
-    {
-        var (msg, _) = ScProtocol.UnpackString8(payload, 0);
-        OnAuthFail?.Invoke(msg);
-    }
-
     private void HandleRoomList(byte[] payload)
     {
         int count = payload[0];
@@ -350,15 +353,31 @@ public class ChatClient : IAsyncDisposable
         {
             int id = payload[pos++];
             int type = payload[pos++];
+            int passwordFlag = payload[pos++];
             var (name, next) = ScProtocol.UnpackString8(payload, pos);
             pos = next;
-            rooms.Add(new RoomInfo(id, name, type));
+            rooms.Add(new RoomInfo(id, name, type, passwordFlag));
         }
         OnRoomList?.Invoke(rooms);
     }
 
+    private void HandleAuthFail(byte[] payload)
+    {
+        var (msg, _) = ScProtocol.UnpackString8(payload, 0);
+        if (_joiningRoom)
+        {
+            _joiningRoom = false;
+            OnJoinFail?.Invoke(msg);
+        }
+        else
+        {
+            OnAuthFail?.Invoke(msg);
+        }
+    }
+
     private void HandleRoomInfo(byte[] payload)
     {
+        _joiningRoom = false;
         int pos = 0;
         int roomId = payload[pos++];
         /* type */
@@ -415,8 +434,16 @@ public class ChatClient : IAsyncDisposable
             ScProtocol.Combine(ScProtocol.PackString8(username), ScProtocol.PackString8(password)));
     }
 
-    public Task JoinRoomAsync(int roomId)
-        => WriteEncryptedAsync(ScProtocol.JOIN_ROOM, [(byte)roomId]);
+    public Task JoinRoomAsync(int roomId, string password = "")
+    {
+        _joiningRoom = true;
+        var pwBytes = System.Text.Encoding.UTF8.GetBytes(password ?? "");
+        var payload = new byte[2 + pwBytes.Length];
+        payload[0] = (byte)roomId;
+        payload[1] = (byte)pwBytes.Length;
+        Array.Copy(pwBytes, 0, payload, 2, pwBytes.Length);
+        return WriteEncryptedAsync(ScProtocol.JOIN_ROOM, payload);
+    }
 
     public Task SendMessageAsync(int roomId, string content)
         => WriteEncryptedAsync(ScProtocol.MESSAGE,
@@ -424,6 +451,40 @@ public class ChatClient : IAsyncDisposable
 
     public Task RequestRoomListAsync()
         => WriteEncryptedAsync(ScProtocol.ROOM_LIST, []);
+
+    private void HandleUserList(byte[] payload)
+    {
+        int count = payload[0]; int pos = 1;
+        var users = new List<UserInfo>(count);
+        for (int i = 0; i < count; i++)
+        {
+            int userId = (payload[pos] << 24) | (payload[pos + 1] << 16) |
+                         (payload[pos + 2] << 8) | payload[pos + 3]; pos += 4;
+            var (username, next) = ScProtocol.UnpackString8(payload, pos); pos = next;
+            int roomId = payload[pos++];
+            users.Add(new UserInfo(userId, username, roomId));
+        }
+        OnUserList?.Invoke(users);
+    }
+
+    private void HandleUserJoin(byte[] payload)
+    {
+        int pos = 0;
+        int userId = (payload[pos] << 24) | (payload[pos + 1] << 16) |
+                     (payload[pos + 2] << 8) | payload[pos + 3]; pos += 4;
+        var (username, next) = ScProtocol.UnpackString8(payload, pos); pos = next;
+        int roomId = pos < payload.Length ? payload[pos] : 0;
+        OnUserJoin?.Invoke(new UserInfo(userId, username, roomId));
+    }
+
+    private void HandleUserLeave(byte[] payload)
+    {
+        int pos = 0;
+        int userId = (payload[pos] << 24) | (payload[pos + 1] << 16) |
+                     (payload[pos + 2] << 8) | payload[pos + 3]; pos += 4;
+        var (username, _) = ScProtocol.UnpackString8(payload, pos);
+        OnUserLeave?.Invoke(userId, username);
+    }
 
     public async Task DisconnectAsync()
     {

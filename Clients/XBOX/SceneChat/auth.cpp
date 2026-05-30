@@ -211,6 +211,7 @@ void Auth_InitLogout(IDirect3DDevice8* pDevice, const char* server_ip) {
     SC_Net_ConnectBegin(server_ip);
     s_state = ST_CONNECTING;   /* wait for handshake, then show login form */
 
+    ScreenKB_Close();
     HID_Init();
 }
 
@@ -230,8 +231,28 @@ int Auth_Update(WORD wPressed) {
 
     s_frame++;
 
+    /*    HID always polled -- even when OSK is open    */
+    HID_Poll();
+
     /*    On-screen keyboard overlay active    */
     if (ScreenKB_IsOpen()) {
+        char hch;
+        int  hspec;
+        char* fbuf = field_buf(s_active_field);
+        int   fmax = field_maxlen(s_active_field);
+        int   flen = (int)lstrlenA(fbuf);
+        /* Inject HID chars directly into field buffer */
+        while ((hch = (char)HID_GetChar()) != 0) {
+            if (flen < fmax) { fbuf[flen++] = hch; fbuf[flen] = 0; }
+        }
+        while ((hspec = HID_GetSpecial()) != HID_KEY_NONE) {
+            if (hspec == HID_KEY_BACKSPACE && flen > 0) { fbuf[--flen] = 0; }
+            else if (hspec == HID_KEY_ENTER) {
+                ScreenKB_Close();
+                do_submit();
+                return AUTH_RESULT_NONE;
+            }
+        }
         kb_result = ScreenKB_Update(wPressed);
         if (kb_result != 0) {
             /* Keyboard closed -- copy result back into the field buffer     */
@@ -611,10 +632,10 @@ void Auth_Draw(IDirect3DDevice8* pDevice) {
     default: break;
     }
 
-    /* Version string -- bottom right corner */
+    /* Version string -- bottom right */
     Font_DrawTextRight(pDevice,
         (float)UI_VIRT_W - 8.0f,
         (float)UI_VIRT_H - Font_GlyphHeight(FONT_SIZE_SMALL) - 6.0f,
-        "v1.1",
+        "v1.2",
         FONT_SIZE_SMALL, UI_COL_TEXT_MUTED);
 }

@@ -150,8 +150,8 @@ void __cdecl main(void) {
     int   chat_result;
 
     /*  Logging -- must be first  */
-    SC_Log_Init();
-    SC_Log("MAIN", "startup");
+    //SC_Log_Init();
+    //SC_Log("MAIN", "startup");
 
     /*  Input  */
     InitInput();

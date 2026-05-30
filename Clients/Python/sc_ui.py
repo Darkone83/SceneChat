@@ -386,6 +386,8 @@ class ChatWidget(QWidget):
         self._username        = ''
         self._rooms           = {}   # id -> (name, type)
         self._msg_ids         = []   # msg_id per appended message (0=unknown)
+        self._pending_room    = None  # room_id being joined (for password retry)
+        self._users           = {}   # user_id -> (username, room_id)
         self._build_ui()
 
     def _build_ui(self):
@@ -436,6 +438,15 @@ class ChatWidget(QWidget):
         self.room_list.setStyleSheet(f'QListWidget {{ background: {COL_SURFACE}; }} QListWidget::item {{ padding: 10px 14px; font-size: 13px; }}')
         self.room_list.itemClicked.connect(self._on_room_clicked)
         slay.addWidget(self.room_list)
+
+        online_lbl = QLabel('ONLINE')
+        online_lbl.setObjectName('lbl_section')
+        slay.addWidget(online_lbl)
+
+        self.user_list = QListWidget()
+        self.user_list.setStyleSheet(f'QListWidget {{ background: {COL_SURFACE}; }} QListWidget::item {{ padding: 6px 14px; font-size: 12px; }}')
+        self.user_list.setMaximumHeight(200)
+        slay.addWidget(self.user_list)
         splitter.addWidget(sidebar)
 
         # Message area
@@ -486,13 +497,52 @@ class ChatWidget(QWidget):
 
     def set_rooms(self, rooms: list):
         self._rooms = {}
+        self._pending_room = None
         self.room_list.clear()
-        for room_id, name, rtype in rooms:
-            self._rooms[room_id] = (name, rtype)
-            prefix = '🔊 ' if rtype == 1 else '# '
-            item = QListWidgetItem(prefix + name)
+        for entry in rooms:
+            room_id, name, rtype = entry[0], entry[1], entry[2]
+            pw_flag = entry[3] if len(entry) > 3 else 0
+            self._rooms[room_id] = (room_id, name, rtype, pw_flag)
+            prefix = '[voice] ' if rtype == 1 else '# '
+            lock   = '* ' if pw_flag else ''
+            item = QListWidgetItem(lock + prefix + name)
             item.setData(Qt.UserRole, room_id)
             self.room_list.addItem(item)
+        # Refresh user list now that room names are available
+        self._refresh_user_list()
+
+    def _refresh_user_list(self):
+        self.user_list.clear()
+        for uid, (username, room_id) in self._users.items():
+            ridx = self._rooms.get(room_id)
+            rname = ridx[1] if ridx else '?'
+            item = QListWidgetItem(f'\u25cf {username}  #{rname}')
+            item.setForeground(QColor(COL_ACCENT))
+            self.user_list.addItem(item)
+
+    def update_user_list(self, users: list):
+        self._users = {uid: (username, room_id) for uid, username, room_id in users}
+        self._refresh_user_list()
+
+    def add_user(self, user_id: int, username: str, room_id: int):
+        self._users[user_id] = (username, room_id)
+        self._refresh_user_list()
+
+    def remove_user(self, user_id: int):
+        self._users.pop(user_id, None)
+        self._refresh_user_list()
+
+    def update_user_room(self, user_id: int, room_id: int):
+        if user_id in self._users:
+            username, _ = self._users[user_id]
+            self._users[user_id] = (username, room_id)
+            self._refresh_user_list()
+
+    def get_room(self, room_id: int):
+        return self._rooms.get(room_id)
+
+    def get_pending_room(self):
+        return self._pending_room
 
     def show_history(self, room_id: int, name: str, history: list):
         self._current_room      = room_id
@@ -528,6 +578,7 @@ class ChatWidget(QWidget):
 
     def _on_room_clicked(self, item):
         room_id = item.data(Qt.UserRole)
+        self._pending_room = room_id
         if room_id != self._current_room:
             self.sig_join_room.emit(room_id)
 
@@ -573,11 +624,12 @@ class ChatWidget(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('SceneChat v1.1')
+        self.setWindowTitle('SceneChat v1.2')
         self.setMinimumSize(900, 600)
         self.resize(1100, 700)
 
         self._worker    = None
+        self._my_user_id = 0
         self._do_register = False
         self._username  = ''
         self._server    = ''
@@ -671,6 +723,10 @@ class MainWindow(QMainWindow):
         self._worker.sig_room_joined.connect(self._on_room_joined)
         self._worker.sig_message.connect(self._on_message)
         self._worker.sig_msg_delete.connect(self._on_msg_delete)
+        self._worker.sig_join_fail.connect(self._on_join_fail)
+        self._worker.sig_user_list.connect(self._on_user_list)
+        self._worker.sig_user_join.connect(self._on_user_join)
+        self._worker.sig_user_leave.connect(self._on_user_leave)
         self._worker.sig_error.connect(self._on_error)
         self._worker.sig_disconnected.connect(self._on_disconnected)
         self._worker.start()
@@ -686,6 +742,7 @@ class MainWindow(QMainWindow):
 
     @Slot(int, str, str)
     def _on_auth_ok(self, user_id: int, username: str, token: str):
+        self._my_user_id = user_id
         # Registration success -- user_id=0, username='' 
         if user_id == 0 and not username:
             self._login_widget.set_busy(False)
@@ -709,15 +766,14 @@ class MainWindow(QMainWindow):
     @Slot(list)
     def _on_room_list(self, rooms: list):
         self._chat_widget.set_rooms(rooms)
-        # Auto-join first text room
-        for room_id, name, rtype in rooms:
-            if rtype == 0:
-                self._worker.send_join_room(room_id)
-                break
+        # No auto-join -- user selects from room list
 
     @Slot(int, str, list)
     def _on_room_joined(self, room_id: int, name: str, history: list):
         self._chat_widget.show_history(room_id, name, history)
+        # Update own room in presence list
+        if self._my_user_id:
+            self._chat_widget.update_user_room(self._my_user_id, room_id)
         self.status_bar.showMessage(f'#{name}')
 
     @Slot(int, str, str, str, int)
@@ -741,7 +797,50 @@ class MainWindow(QMainWindow):
 
     def _on_join_room(self, room_id: int):
         if self._worker:
-            self._worker.send_join_room(room_id)
+            # Check if room is password protected
+            room = self._chat_widget.get_room(room_id)
+            if room and room[3]:  # password_flag
+                from PySide6.QtWidgets import QInputDialog, QLineEdit
+                pw, ok = QInputDialog.getText(
+                    self, "Password Required",
+                    f"Enter password for #{room[1]}:",
+                    QLineEdit.Password
+                )
+                if ok:
+                    self._worker.send_join_room(room_id, pw)
+            else:
+                self._worker.send_join_room(room_id)
+
+    @Slot(str)
+    def _on_join_fail(self, reason: str):
+        from PySide6.QtWidgets import QInputDialog, QLineEdit, QMessageBox
+        if reason == "Wrong password":
+            # Get current room and retry with new password
+            room_id = self._chat_widget.get_pending_room()
+            if room_id is not None:
+                room = self._chat_widget.get_room(room_id)
+                pw, ok = QInputDialog.getText(
+                    self, "Wrong Password",
+                    f"Wrong password for #{room[1] if room else room_id}. Try again:",
+                    QLineEdit.Password
+                )
+                if ok and self._worker:
+                    self._worker.send_join_room(room_id, pw)
+        else:
+            self.status_bar.showMessage(f'Join failed: {reason}')
+
+    @Slot(list)
+    def _on_user_list(self, users: list):
+        self._chat_widget.update_user_list(users)
+        self.status_bar.showMessage(f'{len(users)} user(s) online')
+
+    @Slot(int, str, int)
+    def _on_user_join(self, user_id: int, username: str, room_id: int):
+        self._chat_widget.add_user(user_id, username, room_id)
+
+    @Slot(int, str)
+    def _on_user_leave(self, user_id: int, username: str):
+        self._chat_widget.remove_user(user_id)
 
     def _on_send_message(self, room_id: int, content: str):
         if self._worker:

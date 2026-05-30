@@ -26,7 +26,17 @@ EMOJI_DIR     = '/opt/scenechat/emoji'
 ADMIN_API_URL = 'http://127.0.0.1:8951/admin/send'
 
 def get_db():
-    return mysql.connector.connect(**DB_CONFIG)
+    """Get a DB connection with auto-reconnect on stale connection."""
+    for attempt in range(3):
+        try:
+            conn = mysql.connector.connect(**DB_CONFIG)
+            conn.ping(reconnect=True, attempts=3, delay=1)
+            return conn
+        except mysql.connector.Error as e:
+            app.logger.warning(f"DB connect attempt {attempt+1} failed: {e}")
+            if attempt == 2:
+                raise
+            import time; time.sleep(1)
 
 def is_logged_in():
     return session.get('admin_logged_in', False)
@@ -54,6 +64,16 @@ def require_moderator(f):
         if not is_logged_in() or not is_moderator():
             flash('Access denied')
             return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated
+
+def require_admin(f):
+    from functools import wraps
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not is_logged_in() or session.get('role') not in ('admin', 'superadmin'):
+            flash('Access denied')
+            return redirect(url_for('dashboard'))
         return f(*args, **kwargs)
     return decorated
 
@@ -369,7 +389,7 @@ def rooms():
     try:
         db = get_db()
         cursor = db.cursor()
-        cursor.execute("SELECT id, name, type, created_at FROM rooms ORDER BY type, name")
+        cursor.execute("SELECT id, name, type, created_at, password_hash, access_level FROM rooms ORDER BY type, name")
         rooms = cursor.fetchall()
         return render_template('rooms.html', rooms=rooms)
     except Exception as e:
@@ -380,19 +400,89 @@ def rooms():
         db.close()
 
 @app.route('/rooms/create', methods=['POST'])
-@require_superadmin
+@require_moderator
 def create_room():
-    name = request.form.get('name', '').strip()
-    room_type = request.form.get('type', 'text')
+    name        = request.form.get('name', '').strip()
+    room_type   = request.form.get('type', 'text')
+    password    = request.form.get('password', '').strip()
+    access_level = request.form.get('access_level', 'public')
+    caller_role = session.get('role', 'user')
+
+    # Mods can only create public rooms
+    if caller_role == 'moderator' and access_level != 'public':
+        access_level = 'public'
+
     if not name:
         flash('Room name required')
         return redirect(url_for('rooms'))
     try:
         db = get_db()
         cursor = db.cursor()
-        cursor.execute("INSERT INTO rooms (name, type) VALUES (%s, %s)", (name, room_type))
+        password_hash = None
+        if password:
+            password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt(12)).decode()
+        cursor.execute(
+            "INSERT INTO rooms (name, type, password_hash, access_level) VALUES (%s, %s, %s, %s)",
+            (name, room_type, password_hash, access_level)
+        )
         db.commit()
         flash(f'Room #{name} created')
+    except Exception as e:
+        flash(f'Error: {e}')
+    finally:
+        cursor.close()
+        db.close()
+    return redirect(url_for('rooms'))
+
+@app.route('/rooms/set_acl/<int:room_id>', methods=['POST'])
+@require_moderator
+def set_room_acl(room_id):
+    access_level = request.form.get('access_level', 'public')
+    caller_role  = session.get('role', 'user')
+    # Mods can only toggle between public and moderator
+    if caller_role == 'moderator' and access_level == 'admin':
+        flash('Moderators cannot set admin-only access')
+        return redirect(url_for('rooms'))
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        # Mods cannot change admin-level rooms
+        if caller_role == 'moderator':
+            cursor.execute("SELECT access_level FROM rooms WHERE id = %s", (room_id,))
+            row = cursor.fetchone()
+            if row and row[0] == 'admin':
+                flash('Moderators cannot modify admin-only rooms')
+                return redirect(url_for('rooms'))
+        cursor.execute(
+            "UPDATE rooms SET access_level = %s WHERE id = %s",
+            (access_level, room_id)
+        )
+        db.commit()
+        flash(f'Room access level updated to {access_level}')
+    except Exception as e:
+        flash(f'Error: {e}')
+    finally:
+        cursor.close()
+        db.close()
+    return redirect(url_for('rooms'))
+
+@app.route('/rooms/set_password/<int:room_id>', methods=['POST'])
+@require_admin
+def set_room_password(room_id):
+    password = request.form.get('password', '').strip()
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        if password:
+            password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt(12)).decode()
+        else:
+            password_hash = None
+        cursor.execute(
+            "UPDATE rooms SET password_hash = %s WHERE id = %s",
+            (password_hash, room_id)
+        )
+        db.commit()
+        flash('Room password updated' if password else 'Room password removed')
     except Exception as e:
         flash(f'Error: {e}')
     finally:
@@ -674,6 +764,25 @@ def purge_inactive_users():
         except: pass
     return redirect(url_for('maintenance'))
 
+
+# ---------------------------------------------------------------------------
+#  Online Users
+# ---------------------------------------------------------------------------
+@app.route('/online')
+@require_moderator
+def online_users():
+    return render_template('online.html')
+
+@app.route('/api/online')
+@require_moderator
+def api_online_users():
+    import urllib.request, json as _json
+    try:
+        req = urllib.request.Request('http://127.0.0.1:8951/admin/online')
+        resp = urllib.request.urlopen(req, timeout=2)
+        return resp.read(), 200, {'Content-Type': 'application/json'}
+    except Exception as e:
+        return _json.dumps({'users': [], 'error': str(e)}), 200, {'Content-Type': 'application/json'}
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8950, debug=False)

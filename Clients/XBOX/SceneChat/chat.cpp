@@ -85,6 +85,17 @@ static char          s_server_ip[64] = { 0 };
 static unsigned int  s_user_id_voice = 0;
 static int           s_in_voice_room = 0;
 
+/* v1.2 -- online user list */
+static SC_User      s_users[SC_MAX_USERS];
+static int          s_user_count = 0;
+static int          s_show_users = 0;  /* R3 toggles overlay           */
+static int          s_user_scroll = 0;
+
+/* v1.2 -- password prompt state */
+static int          s_pw_pending = -1; /* room idx waiting for password, -1=none */
+static char         s_pw_buf[SC_MAX_PASSWORD + 1];
+static int          s_pw_len = 0;
+
 /*    Helpers                                                                  */
 
 static void set_status(const char* msg) {
@@ -210,6 +221,36 @@ static int room_idx_by_id(unsigned char id) {
     return -1;
 }
 
+/* Find user by id in s_users -- returns index or -1 */
+static int user_idx_by_id(unsigned int uid) {
+    int i;
+    for (i = 0; i < s_user_count; i++)
+        if (s_users[i].user_id == uid) return i;
+    return -1;
+}
+
+/* Add or update a user in the table */
+static void user_upsert(unsigned int uid, const char* username, unsigned char room_id) {
+    int idx = user_idx_by_id(uid);
+    if (idx < 0) {
+        if (s_user_count >= SC_MAX_USERS) return;
+        idx = s_user_count++;
+    }
+    s_users[idx].user_id = uid;
+    s_users[idx].room_id = room_id;
+    lstrcpynA(s_users[idx].username, username, SC_MAX_USERNAME);
+}
+
+/* Remove a user from the table */
+static void user_remove(unsigned int uid) {
+    int idx = user_idx_by_id(uid);
+    int i;
+    if (idx < 0) return;
+    for (i = idx; i < s_user_count - 1; i++)
+        s_users[i] = s_users[i + 1];
+    s_user_count--;
+}
+
 /*    Join a room by s_rooms index                                             */
 
 static void do_join_room(int idx) {
@@ -219,7 +260,18 @@ static void do_join_room(int idx) {
     s_cur_room = idx;
     s_joining = 1;
     s_joined_id = s_rooms[idx].id;
-    SC_Net_SendJoinRoom(s_rooms[idx].id);
+    /* v1.2: if room needs password, open OSK first */
+    if (s_rooms[idx].password_flag) {
+        s_pw_pending = idx;
+        s_pw_buf[0] = 0;
+        s_pw_len = 0;
+        s_input[0] = 0;
+        s_input_len = 0;
+        s_focus = 1;  /* focus chat/input area */
+        set_status("Password required -- type and press Enter (Y for OSK)");
+        return;
+    }
+    SC_Net_SendJoinRoom(s_rooms[idx].id, "");
 
     /* Voice room handling */
     if (s_in_voice_room) {
@@ -236,9 +288,26 @@ static void do_join_room(int idx) {
 /*    Send the current input buffer                                           */
 
 static void do_send_message(void) {
-    if (s_input_len == 0 || s_cur_room < 0) return;
+    if (s_input_len == 0) return;
     if (!SC_Net_IsReady()) { set_status("Not connected."); return; }
 
+    /* Password pending -- submit join with input as password */
+    if (s_pw_pending >= 0) {
+        int pidx = s_pw_pending;
+        s_pw_pending = -1;
+        cache_clear();
+        s_cur_room = pidx;
+        s_joining = 1;
+        s_joined_id = s_rooms[pidx].id;
+        SC_Net_SendJoinRoom(s_rooms[pidx].id, s_input);
+        s_input[0] = 0;
+        s_input_len = 0;
+        HID_ClearQueue();
+        set_status("");
+        return;
+    }
+
+    if (s_cur_room < 0) return;
     SC_Net_SendMessage(s_rooms[s_cur_room].id, s_input);
     s_input[0] = 0;
     s_input_len = 0;
@@ -277,6 +346,10 @@ void Chat_Init(IDirect3DDevice8* pDevice, const char* username,
     s_room_count = 0;
     s_cur_room = -1;
     s_joined_id = 0xFF;
+    s_user_count = 0;
+    s_show_users = 0;
+    s_pw_pending = -1;
+    s_pw_buf[0] = 0;
     s_joining = 0;
     s_listpending = 0;
     s_focus = 0;
@@ -323,11 +396,30 @@ int Chat_Update(WORD wPressed) {
     if (ScreenKB_IsOpen()) {
         kb_result = ScreenKB_Update(wPressed);
         if (kb_result != 0) {
-            char tmp[SC_MAX_MSGLEN + 1];
-            ScreenKB_GetText(tmp, sizeof(tmp));
-            lstrcpynA(s_input, tmp, sizeof(s_input));
-            s_input_len = (int)lstrlenA(s_input);
-            if (kb_result == 1) do_send_message();
+            /* Check if this was a password prompt */
+            if (s_pw_pending >= 0) {
+                int pidx = s_pw_pending;
+                s_pw_pending = -1;
+                if (kb_result == 1) {
+                    /* Confirmed -- send join with password */
+                    char pw[SC_MAX_PASSWORD + 1];
+                    ScreenKB_GetText(pw, sizeof(pw));
+                    cache_clear();
+                    s_cur_room = pidx;
+                    s_joining = 1;
+                    s_joined_id = s_rooms[pidx].id;
+                    SC_Net_SendJoinRoom(s_rooms[pidx].id, pw);
+                }
+                /* Cancelled -- do nothing */
+            }
+            else {
+                /* Normal chat input */
+                char tmp[SC_MAX_MSGLEN + 1];
+                ScreenKB_GetText(tmp, sizeof(tmp));
+                lstrcpynA(s_input, tmp, sizeof(s_input));
+                s_input_len = (int)lstrlenA(s_input);
+                if (kb_result == 1) do_send_message();
+            }
         }
         return 0;
     }
@@ -351,13 +443,7 @@ int Chat_Update(WORD wPressed) {
     if (s_listpending) {
         if (SC_Net_RecvRoomList(s_rooms, &s_room_count)) {
             s_listpending = 0;
-            /* Auto-join first text room */
-            if (s_cur_room < 0 && s_room_count > 0) {
-                int i;
-                for (i = 0; i < s_room_count; i++) {
-                    if (s_rooms[i].type == 0) { do_join_room(i); break; }
-                }
-            }
+            /* No auto-join -- user selects room from sidebar */
         }
     }
 
@@ -394,11 +480,6 @@ int Chat_Update(WORD wPressed) {
         unsigned int  del_id;
         int           di;
         while (SC_Net_RecvMsgDelete(&del_room, &del_id)) {
-            {
-                char dbg[64];
-                wsprintf(dbg, "DEL room=%d id=%lu", del_room, del_id);
-                set_status(dbg);
-            }
             if ((int)del_room == s_joined_id) {
                 for (di = 0; di < s_msgcache.count; di++) {
                     if (s_msgcache.msg_ids[di] == del_id) {
@@ -414,6 +495,65 @@ int Chat_Update(WORD wPressed) {
                         break;
                     }
                 }
+            }
+        }
+    }
+
+    /* Consume user list/join/leave */
+    {
+        SC_User   u;
+        unsigned int leave_id;
+        char      leave_name[SC_MAX_USERNAME];
+        int       i;
+        /* Full user list on login */
+        if (SC_Net_RecvUserList(s_users, &s_user_count)) {
+            /* list replaced in-place */
+        }
+        /* User joined */
+        while (SC_Net_RecvUserJoin(&u)) {
+            user_upsert(u.user_id, u.username, u.room_id);
+        }
+        /* User left */
+        while (SC_Net_RecvUserLeave(&leave_id, leave_name, sizeof(leave_name))) {
+            user_remove(leave_id);
+        }
+        /* Update room_id for self in user table when we join a room */
+        if (s_joined_id != 0xFF) {
+            for (i = 0; i < s_user_count; i++) {
+                if (lstrcmpA(s_users[i].username, s_my_user) == 0) {
+                    s_users[i].room_id = s_joined_id;
+                    break;
+                }
+            }
+        }
+    }
+
+    /* R3 toggles user overlay */
+    if (wPressed & BTN_RTHUMB) {
+        s_show_users = !s_show_users;
+        s_user_scroll = 0;
+    }
+
+    /* Consume join fail (wrong password / access denied) */
+    {
+        char fail_reason[128];
+        if (SC_Net_RecvJoinFail(fail_reason, sizeof(fail_reason))) {
+            set_status(fail_reason);
+            /* If wrong password -- open OSK to retry */
+            if (s_cur_room >= 0 &&
+                lstrcmpA(fail_reason, "Wrong password") == 0) {
+                s_pw_pending = s_cur_room;
+                s_pw_buf[0] = 0;
+                s_input[0] = 0;
+                s_input_len = 0;
+                s_focus = 1;
+                set_status("Wrong password -- retype and press Enter (Y for OSK)");
+            }
+            else {
+                /* Access denied -- go back to room list */
+                s_cur_room = -1;
+                s_joined_id = 0xFF;
+                s_joining = 0;
             }
         }
     }
@@ -555,7 +695,10 @@ int Chat_Update(WORD wPressed) {
 
     /*    Y: open on-screen keyboard    */
     if (wPressed & BTN_Y) {
-        if (!HID_IsPresent()) {
+        if (s_pw_pending >= 0) {
+            ScreenKB_Open(s_input, SC_MAX_PASSWORD);
+        }
+        else {
             ScreenKB_Open(s_input, SC_MAX_MSGLEN);
         }
     }
@@ -723,8 +866,9 @@ void Chat_Draw(IDirect3DDevice8* pDevice) {
             item_fg = is_notify ? UI_COL_GREEN : UI_COL_TEXT_SEC;
         }
 
-        /* Room icon: # for text, speaker symbol approximation for voice */
-        wsprintf(room_label, "%s%s",
+        /* Room icon: # for text, o for voice, * prefix for password */
+        wsprintf(room_label, "%s%s%s",
+            s_rooms[i].password_flag ? "* " : "",
             s_rooms[i].type == 1 ? "o " : "# ",
             s_rooms[i].name);
 
@@ -876,5 +1020,39 @@ void Chat_Draw(IDirect3DDevice8* pDevice) {
     /*    On-screen keyboard overlay    */
     if (ScreenKB_IsOpen()) {
         ScreenKB_Draw(pDevice);
+    }
+
+    /*    User list overlay (R3)    */
+    if (s_show_users) {
+        float ox = (float)UI_SIDEBAR_W + 8.0f;
+        float oy = (float)UI_HEADER_H + 8.0f;
+        float ow = (float)(UI_VIRT_W - UI_SIDEBAR_W) - 16.0f;
+        float oh = (float)(UI_VIRT_H - UI_HEADER_H - UI_INPUT_H) - 16.0f;
+        int   vis = Ftoi(oh / (float)CHAT_MSG_LINE_H) - 2;
+        int   i;
+        char  line[SC_MAX_USERNAME + 16];
+        (void)ow;
+        UI_DrawRect(pDevice, ox - 4.0f, oy - 4.0f, oh + 8.0f, oh + 8.0f,
+            D3DCOLOR_ARGB(200, 10, 10, 10));
+        Font_DrawText(pDevice, ox, oy,
+            "Online Users", FONT_SIZE_MEDIUM, UI_COL_GREEN, 0);
+        oy += (float)CHAT_MSG_LINE_H + 4.0f;
+        for (i = s_user_scroll; i < s_user_count && i < s_user_scroll + vis; i++) {
+            int   rid = (int)s_users[i].room_id;
+            int   ridx = room_idx_by_id((unsigned char)rid);
+            const char* rname = (ridx >= 0) ? s_rooms[ridx].name : "?";
+            wsprintf(line, "%s  ->  #%s", s_users[i].username, rname);
+            Font_DrawText(pDevice, ox, oy, line,
+                FONT_SIZE_SMALL, UI_COL_TEXT_PRI, 0);
+            oy += (float)CHAT_MSG_LINE_H;
+        }
+        if (s_user_count == 0) {
+            Font_DrawText(pDevice, ox, oy, "Nobody else online",
+                FONT_SIZE_SMALL, UI_COL_TEXT_MUTED, 0);
+        }
+        Font_DrawText(pDevice, ox,
+            (float)UI_VIRT_H - (float)UI_INPUT_H - (float)CHAT_MSG_LINE_H,
+            "R3 to close",
+            FONT_SIZE_SMALL, UI_COL_TEXT_MUTED, 0);
     }
 }

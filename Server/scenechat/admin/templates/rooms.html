@@ -1,19 +1,52 @@
 {% extends 'base.html' %}
 {% block content %}
 <h1 class="page-title">Rooms</h1>
-<div class="card">
-    <h2 style="color: #39ff14; margin-bottom: 16px; font-size: 1em; text-transform: uppercase; letter-spacing: 1px;">Create Room</h2>
-    <form method="POST" action="{{ url_for('create_room') }}">
-        <div class="form-row">
-            <input type="text" name="name" placeholder="room-name" required>
+
+{% with messages = get_flashed_messages() %}
+{% if messages %}
+<div class="card" style="margin-bottom:12px;">
+    {% for m in messages %}
+    <div style="color:#39ff14; padding:4px 0;">{{ m }}</div>
+    {% endfor %}
+</div>
+{% endif %}
+{% endwith %}
+
+<!-- Create Room -->
+<div class="card" style="margin-bottom:16px;">
+    <h2 class="section-title">Create Room</h2>
+    <form method="POST" action="{{ url_for('create_room') }}"
+          style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end;">
+        <div>
+            <label style="display:block; font-size:0.8em; color:#aaa; margin-bottom:4px;">Name</label>
+            <input type="text" name="name" required placeholder="room-name" style="width:160px;">
+        </div>
+        <div>
+            <label style="display:block; font-size:0.8em; color:#aaa; margin-bottom:4px;">Type</label>
             <select name="type">
                 <option value="text">Text</option>
                 <option value="voice">Voice</option>
             </select>
-            <button type="submit" class="btn btn-green">Create</button>
         </div>
+        <div>
+            <label style="display:block; font-size:0.8em; color:#aaa; margin-bottom:4px;">Access</label>
+            <select name="access_level">
+                <option value="public">Public</option>
+                <option value="moderator">Moderator+</option>
+                {% if session.role in ('admin', 'superadmin') %}
+                <option value="admin">Admin only</option>
+                {% endif %}
+            </select>
+        </div>
+        <div>
+            <label style="display:block; font-size:0.8em; color:#aaa; margin-bottom:4px;">Password (optional)</label>
+            <input type="password" name="password" placeholder="Leave blank for none" style="width:180px;">
+        </div>
+        <button type="submit" class="btn btn-green">Create</button>
     </form>
 </div>
+
+<!-- Room List -->
 <div class="card">
     <table>
         <thead>
@@ -21,28 +54,70 @@
                 <th>ID</th>
                 <th>Name</th>
                 <th>Type</th>
+                <th>Access</th>
+                <th>Password</th>
                 <th>Created</th>
                 <th>Actions</th>
             </tr>
         </thead>
         <tbody>
-            {% for room in rooms %}
-            <tr>
-                <td style="color: #555;">{{ room[0] }}</td>
-                <td>#{{ room[1] }}</td>
-                <td>
-                    {% if room[2] == 'voice' %}
-                        <span class="badge badge-purple">Voice</span>
-                    {% else %}
-                        <span class="badge badge-blue">Text</span>
+        {% for room in rooms %}
+        <tr>
+            <td style="color:#555;">{{ room[0] }}</td>
+            <td>{{ room[1] }}</td>
+            <td>
+                {% if room[2] == 'voice' %}
+                    <span class="badge badge-purple">Voice</span>
+                {% else %}
+                    <span class="badge badge-blue">Text</span>
+                {% endif %}
+            </td>
+            <td>
+                <form method="POST" action="{{ url_for('set_room_acl', room_id=room[0]) }}"
+                      style="display:inline-flex; gap:4px;">
+                    <select name="access_level" style="font-size:0.8em; padding:4px 6px;">
+                        <option value="public" {% if room[5] == 'public' %}selected{% endif %}>Public</option>
+                        <option value="moderator" {% if room[5] == 'moderator' %}selected{% endif %}>Mod+</option>
+                        {% if session.role in ('admin', 'superadmin') %}
+                        <option value="admin" {% if room[5] == 'admin' %}selected{% endif %}>Admin</option>
+                        {% endif %}
+                    </select>
+                    <button type="submit" class="btn btn-green" style="padding:4px 8px;">Set</button>
+                </form>
+            </td>
+            <td>
+                {% if session.role in ('admin', 'superadmin') %}
+                    <form method="POST" action="{{ url_for('set_room_password', room_id=room[0]) }}"
+                          style="display:inline-flex; gap:4px;">
+                        <input type="password" name="password"
+                               placeholder="{{ 'Set' if not room[4] else 'Change' }}"
+                               style="width:90px; font-size:0.8em;">
+                        <button type="submit" class="btn btn-purple" style="padding:4px 8px;">
+                            {{ 'Change' if room[4] else 'Set' }}
+                        </button>
+                    </form>
+                    {% if room[4] %}
+                    <form method="POST" action="{{ url_for('set_room_password', room_id=room[0]) }}"
+                          style="display:inline;">
+                        <input type="hidden" name="password" value="">
+                        <button type="submit" class="btn btn-gray" style="padding:4px 8px;"
+                                onclick="return confirm('Remove password from this room?')">Remove</button>
+                    </form>
                     {% endif %}
-                </td>
-                <td style="color: #555;">{{ room[3] }}</td>
-                <td>
-                    <a href="{{ url_for('delete_room', room_id=room[0]) }}" class="btn btn-red" onclick="return confirm('Delete this room and all its messages?')">Delete</a>
-                </td>
-            </tr>
-            {% endfor %}
+                {% else %}
+                    <span style="color:#555;">{{ '[locked]' if room[4] else '&mdash;' }}</span>
+                {% endif %}
+            </td>
+            <td style="color:#555; font-size:0.85em;">{{ room[3] }}</td>
+            <td>
+                {% if session.role == 'superadmin' %}
+                <a href="{{ url_for('delete_room', room_id=room[0]) }}"
+                   class="btn btn-red"
+                   onclick="return confirm('Delete this room and all its messages?')">Delete</a>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
         </tbody>
     </table>
 </div>

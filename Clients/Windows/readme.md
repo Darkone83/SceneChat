@@ -36,6 +36,20 @@ with no .NET installation required.
 
 ---
 
+## Features
+
+- Full DH + ChaCha20-Poly1305 encrypted connection — same security as the Xbox client
+- Login and registration with credential auto-save
+- Multi-room chat with real-time messages
+- Real-time deleted message sync — messages deleted by an admin disappear instantly
+- Inline emoji rendering — type `:smile:` `:fire:` etc.
+- Emoji picker
+- Password protected rooms — dialog prompt on join, retry on wrong password
+- ACL rooms — only visible to users with sufficient role
+- Online users panel — live list of connected users and their current room, updates in real time
+
+---
+
 ## Project structure
 
 ```
@@ -62,8 +76,7 @@ SceneChatWPF/
 
 ## Notes
 
-- Emoji PNGs are downloaded from the admin panel (`http://server:8950/emoji/`)
-  on first login and cached in `emoji_cache/` next to the exe.
-  If the admin panel is unreachable, emoji render as `:token:` text.
 - Credentials are saved to `creds.json` next to the exe for auto-login.
   Logging out clears this file.
+- Room access is enforced server-side. Rooms marked `*` require a password.
+  Rooms not in your list are hidden by the server based on your role.

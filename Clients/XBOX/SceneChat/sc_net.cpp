@@ -874,6 +874,7 @@ int SC_Net_RecvRoomList(SC_Room* rooms, int* count) {
     for (i = 0; i < *count; i++) {
         rooms[i].id = data[pos++];
         rooms[i].type = data[pos++];
+        rooms[i].password_flag = data[pos++] ? 1 : 0;
         pos = unpack_str8(data, pos, rooms[i].name, sizeof(rooms[i].name));
     }
     return 1;
@@ -892,7 +893,7 @@ int SC_Net_RecvRoomInfo(SC_RoomInfo* pOut) {
     pOut->history_count = data[pos++];
     if (pOut->history_count > SC_MAX_HISTORY) pOut->history_count = SC_MAX_HISTORY;
     for (i = 0; i < pOut->history_count; i++) {
-        pos += 4; /* skip msg_id - protocol v1.1 */
+        pos += 4; /* skip msg_id (4 bytes) -- protocol v1.1 */
         pos = unpack_str8(data, pos, pOut->history[i].username, sizeof(pOut->history[i].username));
         pos = unpack_str16(data, pos, pOut->history[i].content, sizeof(pOut->history[i].content));
         pos = unpack_str8(data, pos, pOut->history[i].timestamp, sizeof(pOut->history[i].timestamp));
@@ -901,8 +902,17 @@ int SC_Net_RecvRoomInfo(SC_RoomInfo* pOut) {
 }
 
 int SC_Net_RecvMessage(SC_Message* pOut) {
-    unsigned int dummy = 0;
-    return SC_Net_RecvMessageEx(pOut, &dummy);
+    unsigned char data[SC_MAX_PACKET];
+    int len, idx, pos;
+    idx = queue_peek_type(SCCP_MSG_RECV);
+    if (idx < 0) return 0;
+    queue_pop(idx, data, &len);
+    pOut->room_id = data[0];
+    pos = 1;
+    pos = unpack_str8(data, pos, pOut->username, sizeof(pOut->username));
+    pos = unpack_str16(data, pos, pOut->content, sizeof(pOut->content));
+    pos = unpack_str8(data, pos, pOut->timestamp, sizeof(pOut->timestamp));
+    return 1;
 }
 
 int SC_Net_RecvMessageEx(SC_Message* pOut, unsigned int* pMsgId) {
@@ -925,17 +935,83 @@ int SC_Net_RecvMessageEx(SC_Message* pOut, unsigned int* pMsgId) {
 }
 
 int SC_Net_RecvMsgDelete(unsigned char* pRoomId, unsigned int* pMsgId) {
+    (void)pRoomId; (void)pMsgId; return 0;
+}
+
+int SC_Net_RecvUserList(SC_User* users, int* count) {
     unsigned char data[SC_MAX_PACKET];
-    int len, idx;
-    idx = queue_peek_type(SCCP_MSG_DELETE);
+    int len, idx, i, pos;
+    idx = queue_peek_type(SCCP_USER_LIST);
     if (idx < 0) return 0;
     queue_pop(idx, data, &len);
-    if (len < 5) return 0;
-    *pRoomId = data[0];
-    *pMsgId = ((unsigned int)data[1] << 24) |
-        ((unsigned int)data[2] << 16) |
-        ((unsigned int)data[3] << 8) |
-        (unsigned int)data[4];
+    *count = data[0]; pos = 1;
+    if (*count > SC_MAX_USERS) *count = SC_MAX_USERS;
+    for (i = 0; i < *count; i++) {
+        users[i].user_id = ((unsigned int)data[pos] << 24) |
+            ((unsigned int)data[pos + 1] << 16) |
+            ((unsigned int)data[pos + 2] << 8) |
+            (unsigned int)data[pos + 3]; pos += 4;
+        pos = unpack_str8(data, pos, users[i].username, sizeof(users[i].username));
+        users[i].room_id = data[pos++];
+    }
+    return 1;
+}
+
+int SC_Net_RecvUserJoin(SC_User* pOut) {
+    unsigned char data[SC_MAX_PACKET];
+    int len, idx, pos;
+    idx = queue_peek_type(SCCP_USER_JOIN);
+    if (idx < 0) return 0;
+    queue_pop(idx, data, &len);
+    pos = 0;
+    pOut->user_id = ((unsigned int)data[pos] << 24) |
+        ((unsigned int)data[pos + 1] << 16) |
+        ((unsigned int)data[pos + 2] << 8) |
+        (unsigned int)data[pos + 3]; pos += 4;
+    pos = unpack_str8(data, pos, pOut->username, sizeof(pOut->username));
+    pOut->room_id = (pos < len) ? data[pos] : 0;
+    return 1;
+}
+
+int SC_Net_RecvUserLeave(unsigned int* pUserId, char* username, int bufLen) {
+    unsigned char data[SC_MAX_PACKET];
+    int len, idx, pos;
+    idx = queue_peek_type(SCCP_USER_LEAVE);
+    if (idx < 0) return 0;
+    queue_pop(idx, data, &len);
+    pos = 0;
+    *pUserId = ((unsigned int)data[pos] << 24) |
+        ((unsigned int)data[pos + 1] << 16) |
+        ((unsigned int)data[pos + 2] << 8) |
+        (unsigned int)data[pos + 3]; pos += 4;
+    unpack_str8(data, pos, username, bufLen);
+    return 1;
+}
+
+int SC_Net_SendJoinRoom(unsigned char room_id, const char* password) {
+    unsigned char buf[SC_MAX_PASSWORD + 4];
+    int pos = 0;
+    int pass_len = 0;
+    buf[pos++] = room_id;
+    if (password && password[0]) {
+        const char* p = password;
+        while (*p && pass_len < SC_MAX_PASSWORD) { pass_len++; p++; }
+    }
+    buf[pos++] = (unsigned char)pass_len;
+    if (pass_len > 0) {
+        int k;
+        for (k = 0; k < pass_len; k++) buf[pos++] = (unsigned char)password[k];
+    }
+    return net_send_enc(SCCP_JOIN_ROOM, buf, pos);
+}
+
+int SC_Net_RecvJoinFail(char* reason, int bufLen) {
+    unsigned char data[SC_MAX_PACKET];
+    int len, idx;
+    idx = queue_peek_type(SCCP_AUTH_FAIL);
+    if (idx < 0) return 0;
+    queue_pop(idx, data, &len);
+    unpack_str8(data, 0, reason, bufLen);
     return 1;
 }
 
