@@ -91,9 +91,6 @@ SceneChatWPF/
 
 ## Notes
 
-- Emoji PNGs are downloaded from the admin panel (`http://server:8950/emoji/`)
-  on first login and cached in `emoji_cache/` next to the exe.
-  If the admin panel is unreachable, emoji render as `:token:` text.
 - Credentials are saved to `creds.json` next to the exe for auto-login.
   Logging out clears this file and resets DM/mail state.
 - Room access is enforced server-side. Rooms marked `*` require a password.
