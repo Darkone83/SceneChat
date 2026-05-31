@@ -406,11 +406,23 @@ The voice server does **not** encrypt audio traffic. UDP packet ordering and XBo
 
 Two authentication paths:
 
-**Superadmin** — hardcoded bcrypt hash in source, never stored in database:
+**Superadmin** — bcrypt hash defined in `admin.py`, never stored in the database:
 ```python
 SUPERADMIN_USERNAME      = 'admin'
 SUPERADMIN_PASSWORD_HASH = '$2b$12$...'   # bcrypt rounds=12
 ```
+
+> ⚠️ **Set this before deploying.** The repository ships with a placeholder hash. Generate your own and replace `SUPERADMIN_PASSWORD_HASH` in `admin.py` before exposing the panel.
+
+**Generating a superadmin password hash:**
+
+```bash
+python3 -c "import bcrypt; print(bcrypt.hashpw(input('Password: ').encode(), bcrypt.gensalt(12)).decode())"
+```
+
+Run this on the server, type your chosen password when prompted, and copy the printed `$2b$12$...` string into `SUPERADMIN_PASSWORD_HASH` in `admin.py`. Restart the admin service. You can change `SUPERADMIN_USERNAME` from `admin` to any login name you prefer. The plaintext password is never stored anywhere — only the hash lives in the source file.
+
+After first login you can promote a normal registered account to `admin` from the Users page and use that day to day; the superadmin login is the bootstrap/recovery account.
 
 **Admin/Moderator users** — bcrypt hash in `users` table, role must be `admin` or `moderator`. Banned users cannot log in regardless of role.
 
