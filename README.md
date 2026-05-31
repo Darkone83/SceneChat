@@ -46,6 +46,9 @@ Desktop clients for Windows (WPF) and any platform (Python) connect to the same 
 - 480p display output targeting original Xbox hardware
 
 ### Desktop Clients — v1.3
+
+**Notes: Use darkone83.myddns.me unless you plan on running your own server**
+
 - **Windows (WPF)** — native .NET 8 desktop client
 - **Python (PySide6)** — cross-platform desktop client
 - Both implement the full encrypted protocol, multi-room chat, DMs, mailbox, emoji, and password/ACL rooms
