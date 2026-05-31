@@ -14,15 +14,16 @@ app.secret_key = secrets.token_hex(32)
 
 DB_CONFIG = {
     'host': 'localhost',
-    'user': 'scenechat',
-    'password': 'XbSceneChat01!',
+    'user': 'youruser',
+    'password': 'yourpass',
     'database': 'scenechat'
 }
 
 SUPERADMIN_USERNAME = 'admin'
-SUPERADMIN_PASSWORD_HASH = '$2b$12$QqpCASh5Eil9rYbyHYYPN.hp6810Xrx5hrd1Sl9.YGSx6kwEnJKH2'
+SUPERADMIN_PASSWORD_HASH = 'yourpasshere'
 
 EMOJI_DIR     = '/opt/scenechat/emoji'
+UPDATE_DIR    = '/opt/scenechat/update'
 ADMIN_API_URL = 'http://127.0.0.1:8951/admin/send'
 
 def get_db():
@@ -83,6 +84,30 @@ def require_admin(f):
 @app.route('/emoji/<name>.png')
 def serve_emoji(name):
     return send_from_directory(EMOJI_DIR, f'{name}.png')
+
+
+@app.route('/update/')
+@app.route('/update')
+def update_index():
+    """Browsable index of /opt/scenechat/update/."""
+    os.makedirs(UPDATE_DIR, exist_ok=True)
+    files = []
+    for f in sorted(os.listdir(UPDATE_DIR)):
+        path = os.path.join(UPDATE_DIR, f)
+        if os.path.isfile(path):
+            files.append((f, os.path.getsize(path)))
+    listing = '<html><body><h2>SceneChat Update Files</h2><ul>'
+    for name, size in files:
+        listing += f'<li><a href="/update/{name}">{name}</a> ({size} bytes)</li>'
+    listing += '</ul></body></html>'
+    return listing
+
+
+@app.route('/update/<path:filename>')
+def serve_update(filename):
+    """Serve any file from /opt/scenechat/update/ -- no auth required."""
+    safe = os.path.basename(filename)
+    return send_from_directory(UPDATE_DIR, safe)
 
 # ---------------------------------------------------------------------------
 #  Auth
@@ -150,20 +175,27 @@ def dashboard():
         cursor = db.cursor()
         cursor.execute("SELECT COUNT(*) FROM users")
         user_count = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM rooms")
+        cursor.execute("SELECT COUNT(*) FROM rooms WHERE type != 'dm'")
         room_count = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM messages WHERE is_deleted = 0")
+        cursor.execute("SELECT COUNT(*) FROM messages WHERE is_deleted = 0 AND room_id NOT IN (SELECT id FROM rooms WHERE type = 'dm')")
         message_count = cursor.fetchone()[0]
         cursor.execute("SELECT COUNT(*) FROM users WHERE is_banned = 1")
         banned_count = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM messages WHERE is_deleted = 1")
+        cursor.execute("SELECT COUNT(*) FROM messages WHERE is_deleted = 1 AND room_id NOT IN (SELECT id FROM rooms WHERE type = 'dm')")
         deleted_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM rooms WHERE type = 'dm'")
+        dm_count = cursor.fetchone()[0]
+        # New users in the last 24h -- useful signal post-launch
+        cursor.execute("SELECT COUNT(*) FROM users WHERE created_at >= NOW() - INTERVAL 1 DAY")
+        new_users_24h = cursor.fetchone()[0]
         return render_template('dashboard.html',
             user_count=user_count,
             room_count=room_count,
             message_count=message_count,
             banned_count=banned_count,
-            deleted_count=deleted_count
+            deleted_count=deleted_count,
+            dm_count=dm_count,
+            new_users_24h=new_users_24h
         )
     except Exception as e:
         flash(f'Database error: {e}')
@@ -181,7 +213,7 @@ def monitor():
     try:
         db = get_db()
         cursor = db.cursor()
-        cursor.execute("SELECT id, name, type FROM rooms ORDER BY type, name")
+        cursor.execute("SELECT id, name, type FROM rooms WHERE type != 'dm' ORDER BY type, name")
         rooms = cursor.fetchall()
         # Pass emoji names for the picker
         emoji_names = []
@@ -204,6 +236,11 @@ def api_messages(room_id):
     try:
         db = get_db()
         cursor = db.cursor()
+        # Privacy: never expose DM room contents through the admin API
+        cursor.execute("SELECT type FROM rooms WHERE id = %s", (room_id,))
+        rt = cursor.fetchone()
+        if rt and rt[0] == 'dm':
+            return jsonify([])
         cursor.execute("""
             SELECT m.id, u.username, m.content, m.sent_at, m.is_deleted
             FROM messages m
@@ -389,7 +426,7 @@ def rooms():
     try:
         db = get_db()
         cursor = db.cursor()
-        cursor.execute("SELECT id, name, type, created_at, password_hash, access_level FROM rooms ORDER BY type, name")
+        cursor.execute("SELECT id, name, type, created_at, password_hash, access_level FROM rooms WHERE type != 'dm' ORDER BY type, name")
         rooms = cursor.fetchall()
         return render_template('rooms.html', rooms=rooms)
     except Exception as e:
@@ -446,6 +483,12 @@ def set_room_acl(room_id):
     try:
         db = get_db()
         cursor = db.cursor()
+        # Privacy: DM rooms are not manageable from the rooms UI
+        cursor.execute("SELECT type FROM rooms WHERE id = %s", (room_id,))
+        rt = cursor.fetchone()
+        if rt and rt[0] == 'dm':
+            flash('Cannot modify DM rooms')
+            return redirect(url_for('rooms'))
         # Mods cannot change admin-level rooms
         if caller_role == 'moderator':
             cursor.execute("SELECT access_level FROM rooms WHERE id = %s", (room_id,))
@@ -473,6 +516,12 @@ def set_room_password(room_id):
     try:
         db = get_db()
         cursor = db.cursor()
+        # Privacy: DM rooms are not manageable from the rooms UI
+        cursor.execute("SELECT type FROM rooms WHERE id = %s", (room_id,))
+        rt = cursor.fetchone()
+        if rt and rt[0] == 'dm':
+            flash('Cannot modify DM rooms')
+            return redirect(url_for('rooms'))
         if password:
             password_hash = bcrypt.hashpw(password.encode(), bcrypt.gensalt(12)).decode()
         else:
@@ -496,6 +545,12 @@ def delete_room(room_id):
     try:
         db = get_db()
         cursor = db.cursor()
+        # Privacy: refuse to operate on DM rooms via the rooms UI
+        cursor.execute("SELECT type FROM rooms WHERE id = %s", (room_id,))
+        rt = cursor.fetchone()
+        if rt and rt[0] == 'dm':
+            flash('Cannot delete DM rooms')
+            return redirect(url_for('rooms'))
         cursor.execute("DELETE FROM messages WHERE room_id = %s", (room_id,))
         cursor.execute("DELETE FROM rooms WHERE id = %s", (room_id,))
         db.commit()
@@ -508,6 +563,68 @@ def delete_room(room_id):
     return redirect(url_for('rooms'))
 
 # ---------------------------------------------------------------------------
+#  DM management  (metadata only -- never exposes message content)
+# ---------------------------------------------------------------------------
+@app.route('/dms')
+@require_admin
+def dms():
+    """List DM rooms by participants and activity metadata. Message CONTENT is
+    never shown here -- this is for moderation (e.g. removing abusive DM
+    channels), not for reading private conversations."""
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        # One row per DM room with the two participant usernames, message count
+        # and last activity time. No message bodies are selected.
+        cursor.execute("""
+            SELECT r.id,
+                   GROUP_CONCAT(u.username ORDER BY u.username SEPARATOR ' <-> ') AS participants,
+                   (SELECT COUNT(*) FROM messages m WHERE m.room_id = r.id) AS msg_count,
+                   (SELECT MAX(m.sent_at) FROM messages m WHERE m.room_id = r.id) AS last_activity,
+                   r.created_at
+            FROM rooms r
+            JOIN room_participants p ON p.room_id = r.id
+            JOIN users u ON u.id = p.user_id
+            WHERE r.type = 'dm'
+            GROUP BY r.id, r.created_at
+            ORDER BY last_activity DESC
+        """)
+        dm_rooms = cursor.fetchall()
+        return render_template('dms.html', dm_rooms=dm_rooms)
+    except Exception as e:
+        flash(f'Database error: {e}')
+        return render_template('dms.html', dm_rooms=[])
+    finally:
+        cursor.close()
+        db.close()
+
+@app.route('/dms/delete/<int:room_id>', methods=['POST'])
+@require_admin
+def delete_dm(room_id):
+    """Delete a DM room and its messages (moderation action). Confirms the
+    room really is a DM before deleting so this route can't touch public rooms."""
+    try:
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute("SELECT type FROM rooms WHERE id = %s", (room_id,))
+        rt = cursor.fetchone()
+        if not rt or rt[0] != 'dm':
+            flash('Not a DM room')
+            return redirect(url_for('dms'))
+        cursor.execute("DELETE FROM messages WHERE room_id = %s", (room_id,))
+        cursor.execute("DELETE FROM room_participants WHERE room_id = %s", (room_id,))
+        cursor.execute("DELETE FROM rooms WHERE id = %s", (room_id,))
+        db.commit()
+        app.logger.info(f"DM room {room_id} deleted by admin {session.get('display_name')}")
+        flash('DM channel removed')
+    except Exception as e:
+        flash(f'Error: {e}')
+    finally:
+        cursor.close()
+        db.close()
+    return redirect(url_for('dms'))
+
+# ---------------------------------------------------------------------------
 #  Dashboard stats API (for auto-refresh)
 # ---------------------------------------------------------------------------
 @app.route('/api/dashboard_stats')
@@ -518,17 +635,23 @@ def api_dashboard_stats():
         cursor = db.cursor()
         cursor.execute("SELECT COUNT(*) FROM users")
         user_count = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM rooms")
+        cursor.execute("SELECT COUNT(*) FROM rooms WHERE type != 'dm'")
         room_count = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM messages WHERE is_deleted = 0")
+        cursor.execute("SELECT COUNT(*) FROM messages WHERE is_deleted = 0 AND room_id NOT IN (SELECT id FROM rooms WHERE type = 'dm')")
         message_count = cursor.fetchone()[0]
         cursor.execute("SELECT COUNT(*) FROM users WHERE is_banned = 1")
         banned_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM rooms WHERE type = 'dm'")
+        dm_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM users WHERE created_at >= NOW() - INTERVAL 1 DAY")
+        new_users_24h = cursor.fetchone()[0]
         return jsonify({
             'user_count':    user_count,
             'room_count':    room_count,
             'message_count': message_count,
-            'banned_count':  banned_count
+            'banned_count':  banned_count,
+            'dm_count':      dm_count,
+            'new_users_24h': new_users_24h
         })
     except Exception as e:
         return jsonify({'error': str(e)})
@@ -584,10 +707,10 @@ def maintenance():
             except Exception:
                 stats[table] = 'N/A'
 
-        cursor.execute("SELECT COUNT(*) FROM messages WHERE is_deleted = 1")
+        cursor.execute("SELECT COUNT(*) FROM messages WHERE is_deleted = 1 AND room_id NOT IN (SELECT id FROM rooms WHERE type = 'dm')")
         stats['deleted_messages'] = cursor.fetchone()[0]
 
-        cursor.execute("SELECT COUNT(*) FROM messages WHERE is_deleted = 0")
+        cursor.execute("SELECT COUNT(*) FROM messages WHERE is_deleted = 0 AND room_id NOT IN (SELECT id FROM rooms WHERE type = 'dm')")
         stats['active_messages'] = cursor.fetchone()[0]
 
         # List backups
@@ -783,6 +906,201 @@ def api_online_users():
         return resp.read(), 200, {'Content-Type': 'application/json'}
     except Exception as e:
         return _json.dumps({'users': [], 'error': str(e)}), 200, {'Content-Type': 'application/json'}
+
+# ---------------------------------------------------------------------------
+#  Mailbox
+# ---------------------------------------------------------------------------
+
+@app.route('/mailbox')
+@require_moderator
+def mailbox():
+    my_id = session.get('user_id')
+    try:
+        db     = get_db()
+        cursor = db.cursor()
+        # Inbox -- mail addressed to the logged-in admin/mod
+        inbox = []
+        if my_id:
+            cursor.execute("""
+                SELECT m.id, s.username, m.content, m.sent_at, m.is_read
+                FROM mailbox m
+                JOIN users s ON s.id = m.sender_id
+                WHERE m.recipient_id = %s AND m.is_deleted = 0
+                ORDER BY m.sent_at DESC
+                LIMIT 200
+            """, (my_id,))
+            inbox = cursor.fetchall()
+        # All mail -- full audit view
+        cursor.execute("""
+            SELECT m.id, s.username, r.username, m.content,
+                   m.sent_at, m.is_read, m.is_deleted
+            FROM mailbox m
+            JOIN users s ON s.id = m.sender_id
+            JOIN users r ON r.id = m.recipient_id
+            ORDER BY m.sent_at DESC
+            LIMIT 200
+        """)
+        mails = cursor.fetchall()
+        return render_template('mailbox.html', mails=mails, inbox=inbox)
+    except Exception as e:
+        flash(f'Error: {e}')
+        return render_template('mailbox.html', mails=[], inbox=[])
+    finally:
+        try: cursor.close()
+        except: pass
+        try: db.close()
+        except: pass
+
+
+@app.route('/mailbox/read/<int:mail_id>', methods=['POST'])
+@require_moderator
+def mailbox_read(mail_id):
+    my_id = session.get('user_id')
+    try:
+        db     = get_db()
+        cursor = db.cursor()
+        # Only allow marking own mail read
+        cursor.execute(
+            "UPDATE mailbox SET is_read = 1 WHERE id = %s AND recipient_id = %s",
+            (mail_id, my_id)
+        )
+        db.commit()
+    except Exception as e:
+        flash(f'Error: {e}')
+    finally:
+        try: cursor.close()
+        except: pass
+        try: db.close()
+        except: pass
+    return redirect(url_for('mailbox'))
+
+
+@app.route('/mailbox/read_all', methods=['POST'])
+@require_moderator
+def mailbox_read_all():
+    my_id = session.get('user_id')
+    try:
+        db     = get_db()
+        cursor = db.cursor()
+        cursor.execute(
+            "UPDATE mailbox SET is_read = 1 WHERE recipient_id = %s AND is_read = 0",
+            (my_id,)
+        )
+        db.commit()
+        flash('All mail marked read')
+    except Exception as e:
+        flash(f'Error: {e}')
+    finally:
+        try: cursor.close()
+        except: pass
+        try: db.close()
+        except: pass
+    return redirect(url_for('mailbox'))
+
+
+@app.route('/mailbox/delete/<int:mail_id>', methods=['POST'])
+@require_moderator
+def mailbox_delete(mail_id):
+    try:
+        db     = get_db()
+        cursor = db.cursor()
+        cursor.execute("UPDATE mailbox SET is_deleted = 1 WHERE id = %s", (mail_id,))
+        db.commit()
+        flash(f'Mail {mail_id} deleted')
+    except Exception as e:
+        flash(f'Error: {e}')
+    finally:
+        try: cursor.close()
+        except: pass
+        try: db.close()
+        except: pass
+    return redirect(url_for('mailbox'))
+
+
+@app.route('/mailbox/send', methods=['POST'])
+@require_admin
+def mailbox_send():
+    sender_name    = request.form.get('sender', 'Admin').strip()
+    recipient_name = request.form.get('recipient', '').strip()
+    content        = request.form.get('content', '').strip()
+    if not recipient_name or not content:
+        flash('Recipient and content required')
+        return redirect(url_for('mailbox'))
+    try:
+        db     = get_db()
+        cursor = db.cursor()
+        cursor.execute("SELECT id FROM users WHERE username = %s", (sender_name,))
+        sender = cursor.fetchone()
+        cursor.execute("SELECT id FROM users WHERE username = %s", (recipient_name,))
+        recipient = cursor.fetchone()
+        if not sender or not recipient:
+            flash('Sender or recipient not found')
+            return redirect(url_for('mailbox'))
+        cursor.execute(
+            "INSERT INTO mailbox (sender_id, recipient_id, content) VALUES (%s, %s, %s)",
+            (sender[0], recipient[0], content)
+        )
+        db.commit()
+        flash(f'Mail sent to {recipient_name}')
+    except Exception as e:
+        flash(f'Error: {e}')
+    finally:
+        try: cursor.close()
+        except: pass
+        try: db.close()
+        except: pass
+    return redirect(url_for('mailbox'))
+
+
+# ---------------------------------------------------------------------------
+#  Update management
+# ---------------------------------------------------------------------------
+
+@app.route('/update_mgmt')
+@require_admin
+def update_mgmt():
+    import glob
+    os.makedirs(UPDATE_DIR, exist_ok=True)
+    ver_path = os.path.join(UPDATE_DIR, 'scenechat.ver')
+    xba_path = os.path.join(UPDATE_DIR, 'scenechat.xba')
+    current_ver = ''
+    if os.path.exists(ver_path):
+        with open(ver_path) as f:
+            current_ver = f.read().strip()
+    xba_size = os.path.getsize(xba_path) if os.path.exists(xba_path) else None
+    return render_template('update.html',
+                           current_ver=current_ver,
+                           xba_size=xba_size)
+
+
+@app.route('/update_mgmt/set_version', methods=['POST'])
+@require_admin
+def update_set_version():
+    version = request.form.get('version', '').strip()
+    if not version:
+        flash('Version string required')
+        return redirect(url_for('update_mgmt'))
+    os.makedirs(UPDATE_DIR, exist_ok=True)
+    ver_path = os.path.join(UPDATE_DIR, 'scenechat.ver')
+    with open(ver_path, 'w') as f:
+        f.write(version)
+    flash(f'Version set to {version}')
+    return redirect(url_for('update_mgmt'))
+
+
+@app.route('/update_mgmt/upload_xba', methods=['POST'])
+@require_admin
+def update_upload_xba():
+    f = request.files.get('xba_file')
+    if not f or not f.filename.endswith('.xba'):
+        flash('Please upload a valid .xba file')
+        return redirect(url_for('update_mgmt'))
+    os.makedirs(UPDATE_DIR, exist_ok=True)
+    xba_path = os.path.join(UPDATE_DIR, 'scenechat.xba')
+    f.save(xba_path)
+    flash(f'XBA uploaded: {os.path.getsize(xba_path)} bytes')
+    return redirect(url_for('update_mgmt'))
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8950, debug=False)

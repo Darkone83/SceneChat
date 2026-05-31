@@ -96,6 +96,29 @@ static int          s_pw_pending = -1; /* room idx waiting for password, -1=none
 static char         s_pw_buf[SC_MAX_PASSWORD + 1];
 static int          s_pw_len = 0;
 
+/* v1.3 -- Sidebar mode */
+static int          s_sidebar_mode = 0;  /* 0=rooms 1=DMs              */
+
+/* v1.3 -- DM rooms (separate list from regular rooms) */
+static SC_Room      s_dm_rooms[16];
+static int          s_dm_room_count = 0;
+static int          s_dm_sel = 0;
+
+/* v1.3 -- Mailbox */
+static SC_Mail      s_mails[SC_MAX_MAIL];
+static int          s_mail_count = 0;
+static int          s_mail_unread = 0;
+static int          s_show_mailbox = 0;  /* BLACK toggles overlay      */
+static int          s_mail_sel = 0;  /* selected mail index        */
+static int          s_mail_reading = 0;  /* 0=list 1=reading 2=compose */
+static char         s_compose_to[SC_MAX_USERNAME + 1];
+static char         s_compose_body[SC_MAX_MAIL_BODY + 1];
+static int          s_compose_field = 0;  /* 0=To 1=Body */
+static unsigned int s_compose_uid = 0;  /* pre-filled from R3 overlay */
+
+/* v1.3 -- R3 overlay action hint */
+/* s_show_users already exists -- extended hint line shows A/X/B */
+
 /*    Helpers                                                                  */
 
 static void set_status(const char* msg) {
@@ -307,8 +330,8 @@ static void do_send_message(void) {
         return;
     }
 
-    if (s_cur_room < 0) return;
-    SC_Net_SendMessage(s_rooms[s_cur_room].id, s_input);
+    if (s_joined_id == 0xFF) return;
+    SC_Net_SendMessage((unsigned char)s_joined_id, s_input);
     s_input[0] = 0;
     s_input_len = 0;
     HID_ClearQueue();
@@ -350,6 +373,17 @@ void Chat_Init(IDirect3DDevice8* pDevice, const char* username,
     s_show_users = 0;
     s_pw_pending = -1;
     s_pw_buf[0] = 0;
+    s_sidebar_mode = 0;
+    s_dm_room_count = 0;
+    s_dm_sel = 0;
+    s_mail_count = 0;
+    s_mail_unread = 0;
+    s_show_mailbox = 0;
+    s_mail_sel = 0;
+    s_mail_reading = 0;
+    s_compose_to[0] = 0;
+    s_compose_body[0] = 0;
+    s_compose_uid = 0;
     s_joining = 0;
     s_listpending = 0;
     s_focus = 0;
@@ -412,6 +446,18 @@ int Chat_Update(WORD wPressed) {
                 }
                 /* Cancelled -- do nothing */
             }
+            else if (s_show_mailbox && s_mail_reading == 2) {
+                /* Mailbox compose -- route text to the correct field */
+                if (kb_result == 1) {
+                    char tmp[SC_MAX_MAIL_BODY + 1];
+                    ScreenKB_GetText(tmp, sizeof(tmp));
+                    if (s_compose_field == 0)
+                        lstrcpynA(s_compose_to, tmp, sizeof(s_compose_to));
+                    else
+                        lstrcpynA(s_compose_body, tmp, sizeof(s_compose_body));
+                }
+                /* If cancelled (kb_result == -1) -- leave field unchanged */
+            }
             else {
                 /* Normal chat input */
                 char tmp[SC_MAX_MSGLEN + 1];
@@ -452,6 +498,28 @@ int Chat_Update(WORD wPressed) {
         if (SC_Net_RecvRoomInfo(&room_info)) {
             int i;
             s_joining = 0;
+            /* If this is a DM room, register it in the DM list */
+            if (room_info.room_type == 2) {
+                int found = 0, j;
+                for (j = 0; j < s_dm_room_count; j++) {
+                    if (s_dm_rooms[j].id == room_info.room_id) { found = 1; break; }
+                }
+                if (!found && s_dm_room_count < 16) {
+                    const char* dm_name = room_info.room_name;
+                    if (dm_name[0] == 'D' && dm_name[1] == 'M' && dm_name[2] == ':')
+                        dm_name += 3;
+                    s_dm_rooms[s_dm_room_count].id = (unsigned char)room_info.room_id;
+                    s_dm_rooms[s_dm_room_count].type = 2;
+                    lstrcpynA(s_dm_rooms[s_dm_room_count].name,
+                        dm_name, SC_MAX_USERNAME);
+                    s_dm_room_count++;
+                }
+                s_sidebar_mode = 1;
+            }
+            /* Mark this room as the active/joined room */
+            s_joined_id = (int)room_info.room_id;
+            s_cur_room = room_idx_by_id(room_info.room_id); /* -1 for DM rooms */
+            s_focus = 1;
             cache_clear();
             for (i = 0; i < room_info.history_count; i++)
                 cache_append(&room_info.history[i], 0); /* msg_id skipped in history */
@@ -462,14 +530,17 @@ int Chat_Update(WORD wPressed) {
     {
         unsigned int live_msg_id;
         while (SC_Net_RecvMessageEx(&msg, &live_msg_id)) {
-            int ridx = room_idx_by_id(msg.room_id);
-            if (ridx == s_cur_room) {
+            if ((int)msg.room_id == s_joined_id) {
+                /* Message for the active room (regular or DM) */
                 cache_append(&msg, live_msg_id);
             }
-            else if (ridx >= 0) {
-                /* Notification for other room */
-                s_notify_room = ridx;
-                s_notify_timer = 120;
+            else {
+                int ridx = room_idx_by_id(msg.room_id);
+                if (ridx >= 0) {
+                    /* Notification for another regular room */
+                    s_notify_room = ridx;
+                    s_notify_timer = 120;
+                }
             }
         }
     }
@@ -528,10 +599,54 @@ int Chat_Update(WORD wPressed) {
         }
     }
 
-    /* R3 toggles user overlay */
-    if (wPressed & BTN_RTHUMB) {
-        s_show_users = !s_show_users;
-        s_user_scroll = 0;
+    /* ── Network consumes -- always run regardless of overlay state ────────── */
+
+    /* Consume mail list (delivered on login or when online) */
+    {
+        SC_Mail new_mails[SC_MAX_MAIL];
+        int new_count = 0;
+        if (SC_Net_RecvMailList(new_mails, &new_count)) {
+            int i;
+            for (i = 0; i < new_count&& s_mail_count < SC_MAX_MAIL; i++) {
+                s_mails[s_mail_count++] = new_mails[i];
+                s_mail_unread++;
+            }
+            if (s_mail_unread > 0) {
+                char note[48];
+                int u = s_mail_unread;
+                note[0] = '[';
+                note[1] = (char)('0' + (u > 9 ? 9 : u));
+                note[2] = ']';
+                note[3] = ' ';
+                lstrcpynA(note + 4, "unread mail  [BLACK]", sizeof(note) - 4);
+                set_status(note);
+            }
+        }
+    }
+
+    /* Consume DM room info -- type==2 from server when someone opens a DM
+       with us (we did not initiate, so s_joining is false). Register it in
+       the DM list and notify, but do NOT switch the active view. */
+    {
+        SC_RoomInfo ri;
+        if (SC_Net_RecvRoomInfo(&ri) && ri.room_type == 2) {
+            int found = 0, j;
+            for (j = 0; j < s_dm_room_count; j++) {
+                if (s_dm_rooms[j].id == ri.room_id) { found = 1; break; }
+            }
+            if (!found && s_dm_room_count < 16) {
+                const char* dm_name = ri.room_name;
+                /* Strip "DM:" prefix if present */
+                if (dm_name[0] == 'D' && dm_name[1] == 'M' && dm_name[2] == ':')
+                    dm_name += 3;
+                s_dm_rooms[s_dm_room_count].id = (unsigned char)ri.room_id;
+                s_dm_rooms[s_dm_room_count].type = 2;
+                lstrcpynA(s_dm_rooms[s_dm_room_count].name,
+                    dm_name, SC_MAX_USERNAME);
+                s_dm_room_count++;
+                set_status("New DM  [WHITE] to view DMs");
+            }
+        }
     }
 
     /* Consume join fail (wrong password / access denied) */
@@ -539,7 +654,6 @@ int Chat_Update(WORD wPressed) {
         char fail_reason[128];
         if (SC_Net_RecvJoinFail(fail_reason, sizeof(fail_reason))) {
             set_status(fail_reason);
-            /* If wrong password -- open OSK to retry */
             if (s_cur_room >= 0 &&
                 lstrcmpA(fail_reason, "Wrong password") == 0) {
                 s_pw_pending = s_cur_room;
@@ -550,7 +664,6 @@ int Chat_Update(WORD wPressed) {
                 set_status("Wrong password -- retype and press Enter (Y for OSK)");
             }
             else {
-                /* Access denied -- go back to room list */
                 s_cur_room = -1;
                 s_joined_id = 0xFF;
                 s_joining = 0;
@@ -563,16 +676,224 @@ int Chat_Update(WORD wPressed) {
         set_status(err);
     }
 
-    /* Status timer */
+    /* Timers */
     if (s_status_timer > 0) s_status_timer--;
-
-    /* Notification timer */
     if (s_notify_timer > 0) s_notify_timer--;
     else s_notify_room = -1;
 
+    /* ── HID keyboard poll -- always, routed below by active context ───────── */
+    HID_Poll();
+
+    /* ── Overlay toggles ──────────────────────────────────────────────────── */
+
+    /* BLACK -- toggle mailbox overlay (only when R3 overlay not open) */
+    if ((wPressed & BTN_BLACK) && !s_show_users) {
+        if (s_show_mailbox) {
+            s_show_mailbox = 0;
+            s_mail_reading = 0;
+        }
+        else {
+            s_show_mailbox = 1;
+            s_mail_reading = 0;
+            s_mail_sel = 0;
+            s_mail_unread = 0;
+        }
+    }
+
+    /* R3 -- toggle user overlay (only when mailbox not open) */
+    if ((wPressed & BTN_RTHUMB) && !s_show_mailbox) {
+        s_show_users = !s_show_users;
+        s_user_scroll = 0;
+    }
+
+    /* ════════════════════════════════════════════════════════════════════════
+       OVERLAY INPUT GATE
+       When any overlay is active, that overlay owns ALL input. Handle it and
+       return early so the background (sidebar, chat input, cursor) never sees
+       the input.
+       ════════════════════════════════════════════════════════════════════════ */
+
+       /* ── Mailbox overlay ──────────────────────────────────────────────────── */
+    if (s_show_mailbox) {
+        if (s_mail_reading == 0) {
+            /* List view */
+            if (wPressed & BTN_DPAD_DOWN) {
+                if (s_mail_sel < s_mail_count - 1) s_mail_sel++;
+            }
+            if (wPressed & BTN_DPAD_UP) {
+                if (s_mail_sel > 0) s_mail_sel--;
+            }
+            if ((wPressed & BTN_A) && s_mail_count > 0) {
+                s_mail_reading = 1;
+                SC_Net_SendMailRead(s_mails[s_mail_sel].mail_id);
+            }
+            if ((wPressed & BTN_X) && s_mail_count > 0) {
+                SC_Net_SendMailDelete(s_mails[s_mail_sel].mail_id);
+                {
+                    int j;
+                    for (j = s_mail_sel; j < s_mail_count - 1; j++)
+                        s_mails[j] = s_mails[j + 1];
+                    s_mail_count--;
+                    if (s_mail_sel >= s_mail_count && s_mail_sel > 0)
+                        s_mail_sel--;
+                }
+            }
+            if (wPressed & BTN_Y) {
+                /* Compose -- start on To field */
+                s_compose_to[0] = 0;
+                s_compose_body[0] = 0;
+                s_compose_uid = 0;
+                s_compose_field = 0;
+                s_mail_reading = 2;
+            }
+            if (wPressed & BTN_B) {
+                s_show_mailbox = 0;
+                s_mail_reading = 0;
+            }
+        }
+        else if (s_mail_reading == 1) {
+            /* Reading view */
+            if (wPressed & BTN_B) s_mail_reading = 0;
+        }
+        else if (s_mail_reading == 2) {
+            /* Compose view -- HID types directly into focused field */
+            char* cbuf = (s_compose_field == 0) ? s_compose_to : s_compose_body;
+            int    cmax = (s_compose_field == 0) ? SC_MAX_USERNAME : SC_MAX_MAIL_BODY;
+            int    clen = (int)lstrlenA(cbuf);
+            int    do_send = 0;
+
+            /* HID keyboard input */
+            while ((ch = HID_GetChar()) != 0) {
+                if (clen < cmax) { cbuf[clen++] = ch; cbuf[clen] = 0; }
+            }
+            while ((spec = HID_GetSpecial()) != HID_KEY_NONE) {
+                switch (spec) {
+                case HID_KEY_BACKSPACE:
+                    if (clen > 0) cbuf[--clen] = 0;
+                    break;
+                case HID_KEY_TAB:
+                    s_compose_field = !s_compose_field;
+                    break;
+                case HID_KEY_ENTER:
+                    do_send = 1;
+                    break;
+                case HID_KEY_ESCAPE:
+                    s_show_mailbox = 0; s_mail_reading = 0; s_compose_field = 0;
+                    break;
+                default: break;
+                }
+            }
+
+            /* Controller field switch */
+            if (wPressed & BTN_DPAD_UP)   s_compose_field = 0;
+            if (wPressed & BTN_DPAD_DOWN) s_compose_field = 1;
+
+            /* Controller A opens OSK for focused field (controller-only users) */
+            if (wPressed & BTN_A) {
+                if (s_compose_field == 0)
+                    ScreenKB_Open(s_compose_to, SC_MAX_USERNAME);
+                else
+                    ScreenKB_Open(s_compose_body, SC_MAX_MAIL_BODY);
+            }
+
+            /* Controller START sends */
+            if (wPressed & BTN_START) do_send = 1;
+
+            /* B cancels compose */
+            if (wPressed & BTN_B) {
+                s_mail_reading = 0;
+                s_compose_field = 0;
+            }
+
+            if (do_send && s_compose_body[0]) {
+                if (s_compose_uid != 0) {
+                    SC_Net_SendMailSend(s_compose_uid, s_compose_body);
+                }
+                else {
+                    char send_buf[SC_MAX_MAIL_BODY + SC_MAX_USERNAME + 8];
+                    lstrcpynA(send_buf, "TO:", sizeof(send_buf));
+                    lstrcpynA(send_buf + 3, s_compose_to, sizeof(send_buf) - 3);
+                    int nlen = lstrlenA(send_buf);
+                    send_buf[nlen] = '\n';
+                    lstrcpynA(send_buf + nlen + 1, s_compose_body,
+                        sizeof(send_buf) - nlen - 1);
+                    SC_Net_SendMailSend(0, send_buf);
+                }
+                s_show_mailbox = 0;
+                s_mail_reading = 0;
+                s_compose_field = 0;
+                set_status("Mail sent.");
+            }
+            else if (do_send) {
+                set_status("Message body is empty.");
+            }
+        }
+        return 0;   /* mailbox owns all input this frame */
+    }
+
+    /* ── R3 user overlay ──────────────────────────────────────────────────── */
+    if (s_show_users) {
+        if (wPressed & BTN_DPAD_DOWN) {
+            if (s_user_scroll < s_user_count - 1) s_user_scroll++;
+        }
+        if (wPressed & BTN_DPAD_UP) {
+            if (s_user_scroll > 0) s_user_scroll--;
+        }
+        if (wPressed & BTN_B) {
+            s_show_users = 0;
+        }
+        if ((wPressed & BTN_A) && s_user_count > 0) {
+            /* Open DM with selected user -- s_joining=1 so the ROOM_INFO
+               consumer joins it and switches the view */
+            unsigned int tid = s_users[s_user_scroll].user_id;
+            SC_Net_SendDmOpen(tid);
+            s_joining = 1;
+            s_sidebar_mode = 1;
+            s_show_users = 0;
+        }
+        if ((wPressed & BTN_X) && s_user_count > 0) {
+            /* Compose mail to selected user -- recipient pre-filled */
+            s_compose_uid = s_users[s_user_scroll].user_id;
+            lstrcpynA(s_compose_to, s_users[s_user_scroll].username,
+                sizeof(s_compose_to));
+            s_compose_body[0] = 0;
+            s_compose_field = 1;
+            s_show_users = 0;
+            s_show_mailbox = 1;
+            s_mail_reading = 2;
+        }
+        return 0;   /* R3 overlay owns all input this frame */
+    }
+
+    /* ════════════════════════════════════════════════════════════════════════
+       BACKGROUND INPUT -- only reached when no overlay is active
+       ════════════════════════════════════════════════════════════════════════ */
+
+       /* WHITE -- toggle sidebar mode rooms/DMs */
+    if (wPressed & BTN_WHITE) {
+        s_sidebar_mode = !s_sidebar_mode;
+        s_sidebar_sel = 0;
+        s_dm_sel = 0;
+    }
+
+    /* DM sidebar selection -- mode 1, focus 0 */
+    if (s_sidebar_mode == 1 && s_focus == 0) {
+        if (wPressed & BTN_DPAD_DOWN) {
+            if (s_dm_sel < s_dm_room_count - 1) s_dm_sel++;
+        }
+        if (wPressed & BTN_DPAD_UP) {
+            if (s_dm_sel > 0) s_dm_sel--;
+        }
+        if ((wPressed & (BTN_A | BTN_LTRIG)) && s_dm_room_count > 0) {
+            SC_Net_SendJoinRoom(s_dm_rooms[s_dm_sel].id, "");
+            s_joining = 1;
+            s_focus = 1;
+        }
+    }
+
     /*    Analog cursor movement    */
     GetSticks(lx, ly, rx, ry_stick);
-    ly = -ly;        /* Xbox reports up=positive; invert for UI */
+    ly = -ly;
     ry_stick = -ry_stick;
 
     if (lx > CHAT_DEADZONE || lx < -CHAT_DEADZONE)
@@ -580,13 +901,11 @@ int Chat_Update(WORD wPressed) {
     if (ly > CHAT_DEADZONE || ly < -CHAT_DEADZONE)
         s_cy += (float)ly / 32768.0f * CHAT_CURSOR_SPEED;
 
-    /* Clamp cursor to screen */
     if (s_cx < 0.0f)              s_cx = 0.0f;
     if (s_cx > (float)UI_VIRT_W)  s_cx = (float)UI_VIRT_W;
     if (s_cy < 0.0f)              s_cy = 0.0f;
     if (s_cy > (float)UI_VIRT_H)  s_cy = (float)UI_VIRT_H;
 
-    /* Message scroll with right stick Y */
     if (ry_stick > CHAT_DEADZONE) {
         int max_scroll;
         s_msgcache.scroll++;
@@ -603,8 +922,7 @@ int Chat_Update(WORD wPressed) {
     if (wPressed & BTN_DPAD_LEFT)  s_focus = 0;
     if (wPressed & BTN_DPAD_RIGHT) s_focus = 1;
 
-    if (s_focus == 0) {
-        /* Sidebar focus: navigate rooms */
+    if (s_focus == 0 && s_sidebar_mode == 0) {
         if (wPressed & BTN_DPAD_UP) {
             s_sidebar_sel--;
             if (s_sidebar_sel < 0) s_sidebar_sel = 0;
@@ -614,8 +932,7 @@ int Chat_Update(WORD wPressed) {
             if (s_sidebar_sel >= s_room_count) s_sidebar_sel = s_room_count - 1;
         }
     }
-    else {
-        /* Chat focus: scroll messages */
+    else if (s_focus == 1) {
         if (wPressed & BTN_DPAD_UP) {
             {
                 int max_scroll;
@@ -632,8 +949,7 @@ int Chat_Update(WORD wPressed) {
     }
 
     /*    Click (Left Trigger or A)    */
-    if (wPressed & (BTN_LTRIG | BTN_A)) {
-        /* Cursor-based click */
+    if ((wPressed & (BTN_LTRIG | BTN_A)) && s_sidebar_mode == 0) {
         hit_room = cursor_hit_room();
         if (hit_room >= 0) {
             s_sidebar_sel = hit_room;
@@ -647,16 +963,12 @@ int Chat_Update(WORD wPressed) {
             }
         }
         else if (s_focus == 0 && s_room_count > 0) {
-            /* D-pad mode: join highlighted room */
             do_join_room(s_sidebar_sel);
             s_focus = 1;
         }
     }
 
-    /*    HID keyboard input -- poll unconditionally, IsPresent only
-         gates the UI hint. Gating Poll on IsPresent was chicken-and-egg:
-         presence is set on first keystroke, but poll never ran to get it. */
-    HID_Poll();
+    /*    HID keyboard -- route to main chat input    */
     while ((ch = HID_GetChar()) != 0) {
         if (s_input_len < SC_MAX_MSGLEN) {
             s_input[s_input_len++] = ch;
@@ -683,7 +995,7 @@ int Chat_Update(WORD wPressed) {
         if (s_input_len > 0) do_send_message();
     }
 
-    /*    B: clear input or back    */
+    /*    B: clear input    */
     if (wPressed & BTN_B) {
         if (s_input_len > 0) {
             s_input[0] = 0; s_input_len = 0;
@@ -834,50 +1146,79 @@ void Chat_Draw(IDirect3DDevice8* pDevice) {
         (float)UI_SIDEBAR_W, (float)UI_VIRT_H,
         UI_COL_DIVIDER);
 
-    /* Room list section label */
+    /* Sidebar mode label -- [WHITE] to toggle */
     Font_DrawText(pDevice,
         (float)UI_PADDING,
         (float)(UI_HEADER_H + 10),
-        "ROOMS",
+        s_sidebar_mode == 0 ? "ROOMS" : "DMs",
         FONT_SIZE_SMALL, UI_COL_TEXT_MUTED, 0);
 
-    /* Room list items */
-    for (i = 0; i < s_room_count; i++) {
-        ry = (float)(UI_HEADER_H + 32 + i * UI_SIDEBAR_ITEM_H);
-
-        is_active = (i == s_cur_room);
-        is_sel = (i == s_sidebar_sel && s_focus == 0);
-        is_notify = (i == s_notify_room && (s_frame / 6) % 2 == 0);
-
-        if (is_active) {
-            UI_DrawRectAccent(pDevice,
-                0, ry,
-                (float)UI_SIDEBAR_W, (float)UI_SIDEBAR_ITEM_H,
-                UI_COL_SELECTED, UI_COL_GREEN);
-            item_fg = UI_COL_TEXT_PRI;
+    if (s_sidebar_mode == 0) {
+        /* Room list */
+        for (i = 0; i < s_room_count; i++) {
+            ry = (float)(UI_HEADER_H + 32 + i * UI_SIDEBAR_ITEM_H);
+            is_active = (i == s_cur_room);
+            is_sel = (i == s_sidebar_sel && s_focus == 0);
+            is_notify = (i == s_notify_room && (s_frame / 6) % 2 == 0);
+            if (is_active) {
+                UI_DrawRectAccent(pDevice, 0, ry,
+                    (float)UI_SIDEBAR_W, (float)UI_SIDEBAR_ITEM_H,
+                    UI_COL_SELECTED, UI_COL_GREEN);
+                item_fg = UI_COL_TEXT_PRI;
+            }
+            else if (is_sel) {
+                UI_DrawRect(pDevice, 0, ry,
+                    (float)UI_SIDEBAR_W, (float)UI_SIDEBAR_ITEM_H, UI_COL_HOVER);
+                item_fg = UI_COL_TEXT_PRI;
+            }
+            else {
+                item_fg = is_notify ? UI_COL_GREEN : UI_COL_TEXT_SEC;
+            }
+            wsprintf(room_label, "%s%s%s",
+                s_rooms[i].password_flag ? "* " : "",
+                s_rooms[i].type == 1 ? "o " : "# ",
+                s_rooms[i].name);
+            Font_DrawText(pDevice,
+                (float)(UI_PADDING + UI_ACTIVE_BORDER + 4),
+                ry + (UI_SIDEBAR_ITEM_H - Font_GlyphHeight(FONT_SIZE_MEDIUM)) * 0.5f,
+                room_label, FONT_SIZE_MEDIUM, item_fg,
+                UI_SIDEBAR_W - UI_PADDING * 2);
         }
-        else if (is_sel) {
-            UI_DrawRect(pDevice, 0, ry,
-                (float)UI_SIDEBAR_W, (float)UI_SIDEBAR_ITEM_H,
-                UI_COL_HOVER);
-            item_fg = UI_COL_TEXT_PRI;
+    }
+    else {
+        /* DM list */
+        if (s_dm_room_count == 0) {
+            Font_DrawText(pDevice,
+                (float)UI_PADDING,
+                (float)(UI_HEADER_H + 32),
+                "No DMs yet",
+                FONT_SIZE_SMALL, UI_COL_TEXT_MUTED, 0);
         }
-        else {
-            item_fg = is_notify ? UI_COL_GREEN : UI_COL_TEXT_SEC;
+        for (i = 0; i < s_dm_room_count; i++) {
+            ry = (float)(UI_HEADER_H + 32 + i * UI_SIDEBAR_ITEM_H);
+            is_sel = (i == s_dm_sel && s_focus == 0);
+            is_active = (s_dm_rooms[i].id == s_joined_id);
+            if (is_active) {
+                UI_DrawRectAccent(pDevice, 0, ry,
+                    (float)UI_SIDEBAR_W, (float)UI_SIDEBAR_ITEM_H,
+                    UI_COL_SELECTED, UI_COL_GREEN);
+                item_fg = UI_COL_TEXT_PRI;
+            }
+            else if (is_sel) {
+                UI_DrawRect(pDevice, 0, ry,
+                    (float)UI_SIDEBAR_W, (float)UI_SIDEBAR_ITEM_H, UI_COL_HOVER);
+                item_fg = UI_COL_TEXT_PRI;
+            }
+            else {
+                item_fg = UI_COL_TEXT_SEC;
+            }
+            wsprintf(room_label, "@ %s", s_dm_rooms[i].name);
+            Font_DrawText(pDevice,
+                (float)(UI_PADDING + UI_ACTIVE_BORDER + 4),
+                ry + (UI_SIDEBAR_ITEM_H - Font_GlyphHeight(FONT_SIZE_MEDIUM)) * 0.5f,
+                room_label, FONT_SIZE_MEDIUM, item_fg,
+                UI_SIDEBAR_W - UI_PADDING * 2);
         }
-
-        /* Room icon: # for text, o for voice, * prefix for password */
-        wsprintf(room_label, "%s%s%s",
-            s_rooms[i].password_flag ? "* " : "",
-            s_rooms[i].type == 1 ? "o " : "# ",
-            s_rooms[i].name);
-
-        Font_DrawText(pDevice,
-            (float)(UI_PADDING + UI_ACTIVE_BORDER + 4),
-            ry + (UI_SIDEBAR_ITEM_H - Font_GlyphHeight(FONT_SIZE_MEDIUM)) * 0.5f,
-            room_label,
-            FONT_SIZE_MEDIUM, item_fg,
-            UI_SIDEBAR_W - UI_PADDING * 2);
     }
 
     /*    Chat area    */
@@ -930,6 +1271,22 @@ void Chat_Draw(IDirect3DDevice8* pDevice) {
                 (float)(UI_HEADER_H + 4),
                 heading,
                 FONT_SIZE_MEDIUM, UI_COL_TEXT_PRI, 0);
+        }
+        else if (s_joined_id != 0xFF) {
+            /* DM room -- look up name in DM list */
+            int dm_i;
+            for (dm_i = 0; dm_i < s_dm_room_count; dm_i++) {
+                if (s_dm_rooms[dm_i].id == s_joined_id) {
+                    char heading[SC_MAX_USERNAME + 4];
+                    wsprintf(heading, "@ %s", s_dm_rooms[dm_i].name);
+                    Font_DrawText(pDevice,
+                        (float)(UI_SIDEBAR_W + UI_PADDING),
+                        (float)(UI_HEADER_H + 4),
+                        heading,
+                        FONT_SIZE_MEDIUM, UI_COL_GREEN, 0);
+                    break;
+                }
+            }
         }
 
         /* Scrollbar */
@@ -1017,9 +1374,65 @@ void Chat_Draw(IDirect3DDevice8* pDevice) {
     if (s_in_voice_room)
         Voice_DrawHUD(pDevice);
 
-    /*    On-screen keyboard overlay    */
-    if (ScreenKB_IsOpen()) {
-        ScreenKB_Draw(pDevice);
+    /* Mailbox overlay (BLACK) -- drawn before OSK so keyboard renders on top */
+    if (s_show_mailbox) {
+        float ox = (float)UI_SIDEBAR_W + 8.0f;
+        float oy = (float)UI_HEADER_H + 8.0f;
+        float ow = (float)(UI_VIRT_W - UI_SIDEBAR_W) - 16.0f;
+        float oh = (float)(UI_VIRT_H - UI_HEADER_H - UI_INPUT_H) - 16.0f;
+        int   mi;
+        char  mline[SC_MAX_USERNAME + 32];
+        UI_DrawRect(pDevice, ox - 4.0f, oy - 4.0f, ow + 8.0f, oh + 8.0f,
+            D3DCOLOR_ARGB(220, 10, 10, 10));
+        if (s_mail_reading == 0) {
+            Font_DrawText(pDevice, ox, oy, "Mailbox",
+                FONT_SIZE_MEDIUM, UI_COL_GREEN, 0);
+            oy += (float)CHAT_MSG_LINE_H + 4.0f;
+            if (s_mail_count == 0)
+                Font_DrawText(pDevice, ox, oy, "No mail.",
+                    FONT_SIZE_SMALL, UI_COL_TEXT_MUTED, 0);
+            for (mi = 0; mi < s_mail_count; mi++) {
+                D3DCOLOR mfg = (mi == s_mail_sel) ? UI_COL_GREEN : UI_COL_TEXT_PRI;
+                wsprintf(mline, "%s%s  %s",
+                    mi == s_mail_sel ? "> " : "  ",
+                    s_mails[mi].sender, s_mails[mi].timestamp);
+                Font_DrawText(pDevice, ox, oy, mline, FONT_SIZE_SMALL, mfg, 0);
+                oy += (float)CHAT_MSG_LINE_H;
+            }
+            Font_DrawText(pDevice, ox,
+                (float)UI_VIRT_H - (float)UI_INPUT_H - (float)CHAT_MSG_LINE_H * 2.0f,
+                "[A] Read  [X] Delete  [Y] Compose  [B] Close",
+                FONT_SIZE_SMALL, UI_COL_TEXT_MUTED, 0);
+        }
+        else if (s_mail_reading == 1) {
+            wsprintf(mline, "From: %s  %s",
+                s_mails[s_mail_sel].sender, s_mails[s_mail_sel].timestamp);
+            Font_DrawText(pDevice, ox, oy, mline, FONT_SIZE_SMALL, UI_COL_GREEN, 0);
+            oy += (float)CHAT_MSG_LINE_H + 4.0f;
+            Font_DrawText(pDevice, ox, oy, s_mails[s_mail_sel].body,
+                FONT_SIZE_SMALL, UI_COL_TEXT_PRI, Ftoi(ow));
+            Font_DrawText(pDevice, ox,
+                (float)UI_VIRT_H - (float)UI_INPUT_H - (float)CHAT_MSG_LINE_H * 2.0f,
+                "[B] Back", FONT_SIZE_SMALL, UI_COL_TEXT_MUTED, 0);
+        }
+        else if (s_mail_reading == 2) {
+            D3DCOLOR to_col = (s_compose_field == 0) ? UI_COL_GREEN : UI_COL_TEXT_PRI;
+            D3DCOLOR body_col = (s_compose_field == 1) ? UI_COL_GREEN : UI_COL_TEXT_SEC;
+            Font_DrawText(pDevice, ox, oy, "Compose Mail",
+                FONT_SIZE_MEDIUM, UI_COL_GREEN, 0);
+            oy += (float)CHAT_MSG_LINE_H + 8.0f;
+            wsprintf(mline, "%s To: %s",
+                s_compose_field == 0 ? ">" : " ", s_compose_to);
+            Font_DrawText(pDevice, ox, oy, mline, FONT_SIZE_SMALL, to_col, 0);
+            oy += (float)CHAT_MSG_LINE_H + 8.0f;
+            wsprintf(mline, "%s Msg: %s",
+                s_compose_field == 1 ? ">" : " ", s_compose_body);
+            Font_DrawText(pDevice, ox, oy, mline, FONT_SIZE_SMALL, body_col, Ftoi(ow));
+            oy += (float)CHAT_MSG_LINE_H * 3.0f;
+            Font_DrawText(pDevice, ox, oy,
+                "[up/down] Switch field  [A] Edit  [START] Send  [B] Cancel",
+                FONT_SIZE_SMALL, UI_COL_TEXT_MUTED, Ftoi(ow));
+        }
     }
 
     /*    User list overlay (R3)    */
@@ -1028,12 +1441,12 @@ void Chat_Draw(IDirect3DDevice8* pDevice) {
         float oy = (float)UI_HEADER_H + 8.0f;
         float ow = (float)(UI_VIRT_W - UI_SIDEBAR_W) - 16.0f;
         float oh = (float)(UI_VIRT_H - UI_HEADER_H - UI_INPUT_H) - 16.0f;
-        int   vis = Ftoi(oh / (float)CHAT_MSG_LINE_H) - 2;
+        int   vis = Ftoi(oh / (float)CHAT_MSG_LINE_H) - 3;
         int   i;
-        char  line[SC_MAX_USERNAME + 16];
+        char  line[SC_MAX_USERNAME + 32];
         (void)ow;
         UI_DrawRect(pDevice, ox - 4.0f, oy - 4.0f, oh + 8.0f, oh + 8.0f,
-            D3DCOLOR_ARGB(200, 10, 10, 10));
+            D3DCOLOR_ARGB(220, 10, 10, 10));
         Font_DrawText(pDevice, ox, oy,
             "Online Users", FONT_SIZE_MEDIUM, UI_COL_GREEN, 0);
         oy += (float)CHAT_MSG_LINE_H + 4.0f;
@@ -1041,18 +1454,25 @@ void Chat_Draw(IDirect3DDevice8* pDevice) {
             int   rid = (int)s_users[i].room_id;
             int   ridx = room_idx_by_id((unsigned char)rid);
             const char* rname = (ridx >= 0) ? s_rooms[ridx].name : "?";
-            wsprintf(line, "%s  ->  #%s", s_users[i].username, rname);
-            Font_DrawText(pDevice, ox, oy, line,
-                FONT_SIZE_SMALL, UI_COL_TEXT_PRI, 0);
+            D3DCOLOR ufg = (i == s_user_scroll) ? UI_COL_GREEN : UI_COL_TEXT_PRI;
+            wsprintf(line, "%s%s  #%s",
+                i == s_user_scroll ? "> " : "  ",
+                s_users[i].username, rname);
+            Font_DrawText(pDevice, ox, oy, line, FONT_SIZE_SMALL, ufg, 0);
             oy += (float)CHAT_MSG_LINE_H;
         }
         if (s_user_count == 0) {
             Font_DrawText(pDevice, ox, oy, "Nobody else online",
                 FONT_SIZE_SMALL, UI_COL_TEXT_MUTED, 0);
         }
+        /* Hint line */
         Font_DrawText(pDevice, ox,
-            (float)UI_VIRT_H - (float)UI_INPUT_H - (float)CHAT_MSG_LINE_H,
-            "R3 to close",
+            (float)UI_VIRT_H - (float)UI_INPUT_H - (float)CHAT_MSG_LINE_H * 2.0f,
+            "[A] DM  [X] Mail  [B] Close",
             FONT_SIZE_SMALL, UI_COL_TEXT_MUTED, 0);
     }
+
+    /* On-screen keyboard -- always drawn last so it sits on top of all overlays */
+    if (ScreenKB_IsOpen())
+        ScreenKB_Draw(pDevice);
 }

@@ -1,0 +1,87 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1 class="page-title">Update Management</h1>
+
+{% with messages = get_flashed_messages() %}
+{% if messages %}
+<div class="card" style="margin-bottom:12px;">
+    {% for m in messages %}
+    <div style="color:#39ff14; padding:4px 0;">{{ m }}</div>
+    {% endfor %}
+</div>
+{% endif %}
+{% endwith %}
+
+<!-- Current Status -->
+<div class="card" style="margin-bottom:16px;">
+    <h2 class="section-title">Current Status</h2>
+    <table>
+        <tr>
+            <td style="color:#555; width:180px;">Hosted version</td>
+            <td>
+                {% if current_ver %}
+                <span style="color:#39ff14; font-family:monospace;">{{ current_ver }}</span>
+                {% else %}
+                <span style="color:#555;">Not set</span>
+                {% endif %}
+            </td>
+        </tr>
+        <tr>
+            <td style="color:#555;">XBA package</td>
+            <td>
+                {% if xba_size is not none %}
+                <span style="color:#39ff14;">scenechat.xba &mdash; {{ (xba_size / 1024)|round(1) }} KB</span>
+                {% else %}
+                <span style="color:#555;">Not uploaded</span>
+                {% endif %}
+            </td>
+        </tr>
+        <tr>
+            <td style="color:#555;">Download URLs</td>
+            <td style="font-family:monospace; font-size:0.85em; color:#aaa;">
+                /update/scenechat.ver<br>
+                /update/scenechat.xba
+            </td>
+        </tr>
+    </table>
+</div>
+
+<!-- Set Version -->
+<div class="card" style="margin-bottom:16px;">
+    <h2 class="section-title">Set Version String</h2>
+    <p style="color:#555; font-size:0.85em; margin-bottom:10px;">
+        This is the version string Xbox clients compare against their built-in version.
+        Format: <code>MAJOR.MINOR.PATCH</code> e.g. <code>1.3</code>
+    </p>
+    <form method="POST" action="{{ url_for('update_set_version') }}"
+          style="display:flex; gap:8px; align-items:center;">
+        <input type="text" name="version" required
+               placeholder="1.3"
+               value="{{ current_ver }}"
+               style="width:120px; font-family:monospace;">
+        <button type="submit" class="btn btn-green">Set Version</button>
+    </form>
+</div>
+
+<!-- Upload XBA -->
+<div class="card">
+    <h2 class="section-title">Upload XBA Package</h2>
+    <p style="color:#555; font-size:0.85em; margin-bottom:10px;">
+        Upload the SceneChat XBA archive. Xbox clients will download this when an update
+        is accepted. Set the version string after uploading.
+    </p>
+    <form method="POST" action="{{ url_for('update_upload_xba') }}"
+          enctype="multipart/form-data"
+          style="display:flex; gap:8px; align-items:center;"
+          onsubmit="return confirm('Replace the current XBA package?')">
+        <input type="file" name="xba_file" accept=".xba" required
+               style="font-size:0.85em;">
+        <button type="submit" class="btn btn-purple">Upload</button>
+    </form>
+    {% if xba_size is not none %}
+    <p style="color:#555; font-size:0.8em; margin-top:10px;">
+        Current package will be overwritten. Always update the version string after uploading.
+    </p>
+    {% endif %}
+</div>
+{% endblock %}

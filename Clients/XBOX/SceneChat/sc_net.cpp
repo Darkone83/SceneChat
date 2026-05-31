@@ -1015,6 +1015,77 @@ int SC_Net_RecvJoinFail(char* reason, int bufLen) {
     return 1;
 }
 
+int SC_Net_RecvUpdateAvail(char* versionBuf, int bufLen) {
+    unsigned char data[SC_MAX_PACKET];
+    int len, idx;
+    idx = queue_peek_type(SCCP_UPDATE_AVAIL);
+    if (idx < 0) return 0;
+    queue_pop(idx, data, &len);
+    unpack_str8(data, 0, versionBuf, bufLen);
+    return 1;
+}
+
+/* ── v1.3 DM and Mailbox ──────────────────────────────────────────────────── */
+
+int SC_Net_SendDmOpen(unsigned int target_user_id) {
+    unsigned char buf[4];
+    buf[0] = (unsigned char)((target_user_id >> 24) & 0xFF);
+    buf[1] = (unsigned char)((target_user_id >> 16) & 0xFF);
+    buf[2] = (unsigned char)((target_user_id >> 8) & 0xFF);
+    buf[3] = (unsigned char)(target_user_id & 0xFF);
+    return net_send_enc(SCCP_DM_OPEN, buf, 4);
+}
+
+int SC_Net_RecvMailList(SC_Mail* mails, int* count) {
+    unsigned char data[SC_MAX_PACKET];
+    int len, idx, i, pos;
+    idx = queue_peek_type(SCCP_MAIL_LIST);
+    if (idx < 0) return 0;
+    queue_pop(idx, data, &len);
+    /* [count 2B] per mail: [mail_id 4B][sender str8][body str16][ts str8] */
+    *count = ((int)data[0] << 8) | (int)data[1]; pos = 2;
+    if (*count > SC_MAX_MAIL) *count = SC_MAX_MAIL;
+    for (i = 0; i < *count; i++) {
+        mails[i].mail_id = ((unsigned int)data[pos] << 24) |
+            ((unsigned int)data[pos + 1] << 16) |
+            ((unsigned int)data[pos + 2] << 8) |
+            (unsigned int)data[pos + 3]; pos += 4;
+        pos = unpack_str8(data, pos, mails[i].sender, sizeof(mails[i].sender));
+        pos = unpack_str16(data, pos, mails[i].body, sizeof(mails[i].body));
+        pos = unpack_str8(data, pos, mails[i].timestamp, sizeof(mails[i].timestamp));
+    }
+    return 1;
+}
+
+int SC_Net_SendMailSend(unsigned int recipient_id, const char* body) {
+    unsigned char buf[SC_MAX_MAIL_BODY + 8];
+    int pos = 0;
+    buf[pos++] = (unsigned char)((recipient_id >> 24) & 0xFF);
+    buf[pos++] = (unsigned char)((recipient_id >> 16) & 0xFF);
+    buf[pos++] = (unsigned char)((recipient_id >> 8) & 0xFF);
+    buf[pos++] = (unsigned char)(recipient_id & 0xFF);
+    pos = pack_str16(buf, pos, body);
+    return net_send_enc(SCCP_MAIL_SEND, buf, pos);
+}
+
+int SC_Net_SendMailRead(unsigned int mail_id) {
+    unsigned char buf[4];
+    buf[0] = (unsigned char)((mail_id >> 24) & 0xFF);
+    buf[1] = (unsigned char)((mail_id >> 16) & 0xFF);
+    buf[2] = (unsigned char)((mail_id >> 8) & 0xFF);
+    buf[3] = (unsigned char)(mail_id & 0xFF);
+    return net_send_enc(SCCP_MAIL_READ, buf, 4);
+}
+
+int SC_Net_SendMailDelete(unsigned int mail_id) {
+    unsigned char buf[4];
+    buf[0] = (unsigned char)((mail_id >> 24) & 0xFF);
+    buf[1] = (unsigned char)((mail_id >> 16) & 0xFF);
+    buf[2] = (unsigned char)((mail_id >> 8) & 0xFF);
+    buf[3] = (unsigned char)(mail_id & 0xFF);
+    return net_send_enc(SCCP_MAIL_DELETE, buf, 4);
+}
+
 int SC_Net_RecvError(char* buf, int bufLen) {
     unsigned char data[SC_MAX_PACKET];
     int len, idx;

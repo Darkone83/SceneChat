@@ -25,8 +25,10 @@
     <ClCompile Include="sc_log.cpp" />
     <ClCompile Include="sc_net.cpp" />
     <ClCompile Include="sc_testinput.cpp" />
+    <ClCompile Include="sc_update.cpp" />
     <ClCompile Include="ui.cpp" />
     <ClCompile Include="voice.cpp" />
+    <ClCompile Include="xba.cpp" />
   </ItemGroup>
   <ItemGroup>
     <Text Include="Media\Copy Assets Here.txt" />
@@ -47,8 +49,10 @@
     <ClInclude Include="sc_log.h" />
     <ClInclude Include="sc_net.h" />
     <ClInclude Include="sc_textinput.h" />
+    <ClInclude Include="sc_update.h" />
     <ClInclude Include="ui.h" />
     <ClInclude Include="voice.h" />
+    <ClInclude Include="xba.h" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>16.0</VCProjectVersion>
@@ -199,11 +203,22 @@ MKDIR "$(OutDir)XISO"
     <PostBuildEvent>
       <Message>Creating Xbox Image...</Message>
       <Command>"$(RXDK_LIBS)bin\patchSubsystem.exe" -i="$(OutDir)$(TargetFileName)" -s=0x000E
-"$(RXDK_LIBS)bin\imagebld.exe" /in:"$(OutDir)$(TargetFileName)" /out:"$(OutDir)$(TargetName).xbe" /nologo /stack:65536 /debug /nolibwarn
-MKDIR "$(OutDir)Build\$(ProjectName)"
-COPY /Y "$(OutDir)$(TargetName).xbe" "$(OutDir)Build\$(ProjectName)\default.xbe"
-XCOPY /I /E /S /Y /F "$(ProjectDir)Media\*" "$(OutDir)Build\$(ProjectName)"
-MKDIR "$(OutDir)XISO"
+COPY /Y "$(ProjectDir)titleimage.png" "$(OutDir)titleimage.png" &gt;NUL
+ECHO Texture MyTex &gt; "$(OutDir)titleimage.rdf"
+ECHO { &gt;&gt; "$(OutDir)titleimage.rdf"
+ECHO Source titleimage.png &gt;&gt; "$(OutDir)titleimage.rdf"
+ECHO Format D3DFMT_DXT1 &gt;&gt; "$(OutDir)titleimage.rdf"
+ECHO Width 128 &gt;&gt; "$(OutDir)titleimage.rdf"
+ECHO Height 128 &gt;&gt; "$(OutDir)titleimage.rdf"
+ECHO } &gt;&gt; "$(OutDir)titleimage.rdf"
+"$(RXDK_LIBS)bin\bundler.exe" "$(OutDir)titleimage.rdf" -o "$(OutDir)titleimage.xbx"
+DEL /q "$(OutDir)titleimage.rdf"
+DEL /q "$(OutDir)titleimage.h"
+"$(RXDK_LIBS)bin\imagebld.exe" /in:"$(OutDir)$(TargetFileName)" /out:"$(OutDir)$(TargetName).xbe" /nologo /stack:65536 /debug /nolibwarn /testid:"0x54520008" /testname:"SceneChat" /titleimage:"$(OutDir)titleimage.xbx" /defaultsaveimage:"$(OutDir)titleimage.xbx"
+MKDIR "$(OutDir)Build\$(ProjectName)" &gt;NUL 2&gt;&amp;1
+COPY /Y "$(OutDir)$(TargetName).xbe" "$(OutDir)Build\$(ProjectName)\default.xbe" &gt;NUL
+XCOPY /C /Q /I /E /S /Y /F "$(ProjectDir)Media\*" "$(OutDir)Build\$(ProjectName)" &gt;NUL 2&gt;NUL
+MKDIR "$(OutDir)XISO" &gt;NUL 2&gt;&amp;1
 "$(RXDK_LIBS)bin\xdvdfs.exe" pack "$(OutDir)Build\$(ProjectName)" "$(OutDir)XISO\$(ProjectName).iso"</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>

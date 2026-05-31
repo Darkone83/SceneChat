@@ -1,0 +1,43 @@
+﻿<Window x:Class="SceneChatWPF.UI.ComposeMailWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Compose Mail"
+        Width="440" Height="360"
+        Background="{StaticResource BrBg}"
+        WindowStartupLocation="CenterOwner">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Text="To (username)"
+                   FontSize="11" Foreground="{StaticResource BrMuted}"
+                   Margin="0,0,0,4"/>
+        <TextBox x:Name="TxtTo" Grid.Row="1" Margin="0,0,0,12"/>
+
+        <TextBlock Grid.Row="2" Text="Message"
+                   FontSize="11" Foreground="{StaticResource BrMuted}"
+                   Margin="0,0,0,4"/>
+        <TextBox x:Name="TxtBody" Grid.Row="3"
+                 AcceptsReturn="True"
+                 TextWrapping="Wrap"
+                 VerticalScrollBarVisibility="Auto"
+                 Margin="0,0,0,12"/>
+
+        <StackPanel Grid.Row="4" Orientation="Horizontal"
+                    HorizontalAlignment="Right">
+            <Button Content="Cancel" Width="80" Height="32"
+                    Background="Transparent" BorderBrush="#333333"
+                    Foreground="{StaticResource BrMuted}"
+                    Margin="0,0,8,0"
+                    Click="BtnCancel_Click"/>
+            <Button Content="Send" Width="80" Height="32"
+                    Style="{StaticResource BtnPrimary}"
+                    Click="BtnSend_Click"/>
+        </StackPanel>
+    </Grid>
+</Window>

@@ -1,0 +1,137 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1 class="page-title">Mailbox</h1>
+
+{% with messages = get_flashed_messages() %}
+{% if messages %}
+<div class="card" style="margin-bottom:12px;">
+    {% for m in messages %}
+    <div style="color:#39ff14; padding:4px 0;">{{ m }}</div>
+    {% endfor %}
+</div>
+{% endif %}
+{% endwith %}
+
+<!-- Inbox -->
+<div class="card" style="margin-bottom:16px;">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+        <h2 class="section-title" style="margin:0;">Inbox</h2>
+        {% if inbox %}
+        <form method="POST" action="{{ url_for('mailbox_read_all') }}" style="margin:0;">
+            <button type="submit" class="btn btn-green">Mark all read</button>
+        </form>
+        {% endif %}
+    </div>
+    {% if inbox %}
+    <table>
+        <thead>
+            <tr>
+                <th style="width:40px;"></th>
+                <th>From</th>
+                <th>Message</th>
+                <th>Received</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for mail in inbox %}
+        <tr style="{% if not mail[4] %}background:rgba(57,255,20,0.06);{% endif %}">
+            <td>
+                {% if not mail[4] %}
+                <span title="Unread" style="color:#39ff14; font-size:1.2em;">&#9679;</span>
+                {% else %}
+                <span title="Read" style="color:#555;">&#9675;</span>
+                {% endif %}
+            </td>
+            <td style="color:#8b5cf6; font-weight:{% if not mail[4] %}bold{% else %}normal{% endif %};">{{ mail[1] }}</td>
+            <td style="max-width:420px; white-space:pre-wrap; word-break:break-word; {% if not mail[4] %}color:#fff;{% else %}color:#aaa;{% endif %}">{{ mail[2] }}</td>
+            <td style="color:#555; font-size:0.85em;">{{ mail[3] }}</td>
+            <td>
+                {% if not mail[4] %}
+                <form method="POST" action="{{ url_for('mailbox_read', mail_id=mail[0]) }}" style="display:inline;">
+                    <button type="submit" class="btn btn-green">Mark read</button>
+                </form>
+                {% endif %}
+                <form method="POST" action="{{ url_for('mailbox_delete', mail_id=mail[0]) }}"
+                      style="display:inline;" onsubmit="return confirm('Delete this mail?')">
+                    <button type="submit" class="btn btn-red">Delete</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p style="color:#555;">Your inbox is empty.</p>
+    {% endif %}
+</div>
+
+<!-- Compose -->
+<div class="card" style="margin-bottom:16px;">
+    <h2 class="section-title">Compose Mail</h2>
+    <form method="POST" action="{{ url_for('mailbox_send') }}">
+        <div style="display:flex; gap:12px; margin-bottom:10px; flex-wrap:wrap;">
+            <div>
+                <label style="display:block; font-size:0.8em; color:#aaa; margin-bottom:4px;">From</label>
+                <input type="text" name="sender" value="{{ session.display_name }}" style="width:160px;">
+            </div>
+            <div>
+                <label style="display:block; font-size:0.8em; color:#aaa; margin-bottom:4px;">To (username)</label>
+                <input type="text" name="recipient" required placeholder="username" style="width:160px;">
+            </div>
+        </div>
+        <div style="margin-bottom:10px;">
+            <label style="display:block; font-size:0.8em; color:#aaa; margin-bottom:4px;">Message</label>
+            <textarea name="content" required rows="4" placeholder="Type your message..."
+                      style="width:100%; resize:vertical; font-family:inherit; font-size:0.95em;
+                             background:#1a1a1a; color:#fff; border:1px solid #333;
+                             border-radius:4px; padding:8px;"></textarea>
+        </div>
+        <button type="submit" class="btn btn-green">Send Mail</button>
+    </form>
+</div>
+
+<!-- All Mail (audit) -->
+<div class="card">
+    <h2 class="section-title">All Mail (audit, last 200)</h2>
+    {% if mails %}
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>From</th>
+                <th>To</th>
+                <th>Content</th>
+                <th>Sent</th>
+                <th>Read</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for mail in mails %}
+        <tr {% if mail[6] %}style="opacity:0.4;"{% endif %}>
+            <td style="color:#555;">{{ mail[0] }}</td>
+            <td style="color:#8b5cf6;">{{ mail[1] }}</td>
+            <td style="color:#39ff14;">{{ mail[2] }}</td>
+            <td style="max-width:360px; white-space:pre-wrap; word-break:break-word;">{{ mail[3] }}</td>
+            <td style="color:#555; font-size:0.85em;">{{ mail[4] }}</td>
+            <td>{% if mail[5] %}<span style="color:#39ff14;">Yes</span>{% else %}<span style="color:#555;">No</span>{% endif %}</td>
+            <td>
+                {% if not mail[6] %}
+                <form method="POST" action="{{ url_for('mailbox_delete', mail_id=mail[0]) }}"
+                      onsubmit="return confirm('Delete this mail?')">
+                    <button type="submit" class="btn btn-red">Delete</button>
+                </form>
+                {% else %}
+                <span style="color:#555;">Deleted</span>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p style="color:#555;">No mail yet.</p>
+    {% endif %}
+</div>
+{% endblock %}

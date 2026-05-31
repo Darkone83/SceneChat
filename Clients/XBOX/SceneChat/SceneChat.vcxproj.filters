@@ -66,6 +66,12 @@
     <ClCompile Include="emoji.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="xba.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="sc_update.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <Text Include="Media\Copy Assets Here.txt">
@@ -122,6 +128,12 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="emoji_atlas.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="xba.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="sc_update.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

@@ -28,6 +28,11 @@ public static class ScProtocol
     public const byte USER_LIST = 0x11;
     public const byte USER_JOIN = 0x12;
     public const byte USER_LEAVE = 0x13;
+    public const byte DM_OPEN = 0x14;
+    public const byte MAIL_LIST = 0x15;
+    public const byte MAIL_SEND = 0x16;
+    public const byte MAIL_READ = 0x17;
+    public const byte MAIL_DELETE = 0x18;
 
     // ── String packing (matches server.py pack_string8/16) ──────────────────
 

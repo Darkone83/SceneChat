@@ -12,7 +12,8 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QLineEdit, QPushButton, QListWidget, QListWidgetItem,
     QTextEdit, QSplitter, QFrame, QStatusBar, QMessageBox,
-    QScrollArea, QGridLayout, QDialog
+    QScrollArea, QGridLayout, QDialog, QMenu, QInputDialog,
+    QPlainTextEdit, QComboBox
 )
 from PySide6.QtCore import Qt, QSize, QTimer, Signal, Slot
 from PySide6.QtGui import (
@@ -378,6 +379,9 @@ class ChatWidget(QWidget):
     sig_join_room   = Signal(int)
     sig_send        = Signal(int, str)
     sig_logout      = Signal()
+    sig_open_dm     = Signal(int, str)    # user_id, username
+    sig_mail_user   = Signal(int, str)    # user_id, username (compose to)
+    sig_open_mailbox = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -388,6 +392,7 @@ class ChatWidget(QWidget):
         self._msg_ids         = []   # msg_id per appended message (0=unknown)
         self._pending_room    = None  # room_id being joined (for password retry)
         self._users           = {}   # user_id -> (username, room_id)
+        self._dm_rooms        = {}   # room_id -> display_name
         self._build_ui()
 
     def _build_ui(self):
@@ -410,6 +415,12 @@ class ChatWidget(QWidget):
         self.lbl_user = QLabel('')
         self.lbl_user.setStyleSheet(f'color: {COL_PURPLE}; font-size: 12px;')
         tlay.addWidget(self.lbl_user)
+
+        self.btn_mailbox = QPushButton('Mailbox')
+        self.btn_mailbox.setFixedWidth(80)
+        self.btn_mailbox.setStyleSheet(f'QPushButton {{ background: none; border: 1px solid #333; color: {COL_ACCENT}; border-radius: 4px; padding: 4px 10px; font-size: 11px; }} QPushButton:hover {{ border-color: {COL_ACCENT}; }}')
+        self.btn_mailbox.clicked.connect(self.sig_open_mailbox)
+        tlay.addWidget(self.btn_mailbox)
 
         btn_logout = QPushButton('Logout')
         btn_logout.setFixedWidth(70)
@@ -439,6 +450,17 @@ class ChatWidget(QWidget):
         self.room_list.itemClicked.connect(self._on_room_clicked)
         slay.addWidget(self.room_list)
 
+        # DM section
+        dm_lbl = QLabel('DIRECT MESSAGES')
+        dm_lbl.setObjectName('lbl_section')
+        slay.addWidget(dm_lbl)
+
+        self.dm_list = QListWidget()
+        self.dm_list.setStyleSheet(f'QListWidget {{ background: {COL_SURFACE}; }} QListWidget::item {{ padding: 8px 14px; font-size: 13px; }}')
+        self.dm_list.setMaximumHeight(150)
+        self.dm_list.itemClicked.connect(self._on_dm_clicked)
+        slay.addWidget(self.dm_list)
+
         online_lbl = QLabel('ONLINE')
         online_lbl.setObjectName('lbl_section')
         slay.addWidget(online_lbl)
@@ -446,6 +468,9 @@ class ChatWidget(QWidget):
         self.user_list = QListWidget()
         self.user_list.setStyleSheet(f'QListWidget {{ background: {COL_SURFACE}; }} QListWidget::item {{ padding: 6px 14px; font-size: 12px; }}')
         self.user_list.setMaximumHeight(200)
+        self.user_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.user_list.customContextMenuRequested.connect(self._on_user_menu)
+        self.user_list.itemDoubleClicked.connect(self._on_user_dblclick)
         slay.addWidget(self.user_list)
         splitter.addWidget(sidebar)
 
@@ -518,6 +543,8 @@ class ChatWidget(QWidget):
             rname = ridx[1] if ridx else '?'
             item = QListWidgetItem(f'\u25cf {username}  #{rname}')
             item.setForeground(QColor(COL_ACCENT))
+            item.setData(Qt.UserRole, uid)
+            item.setData(Qt.UserRole + 1, username)
             self.user_list.addItem(item)
 
     def update_user_list(self, users: list):
@@ -537,6 +564,50 @@ class ChatWidget(QWidget):
             username, _ = self._users[user_id]
             self._users[user_id] = (username, room_id)
             self._refresh_user_list()
+
+    def _on_user_menu(self, pos):
+        item = self.user_list.itemAt(pos)
+        if not item:
+            return
+        uid   = item.data(Qt.UserRole)
+        uname = item.data(Qt.UserRole + 1)
+        if uid is None or uid == self.parent_user_id():
+            return
+        menu = QMenu(self)
+        act_dm   = menu.addAction(f'Open DM with {uname}')
+        act_mail = menu.addAction(f'Send mail to {uname}')
+        chosen = menu.exec(self.user_list.mapToGlobal(pos))
+        if chosen == act_dm:
+            self.sig_open_dm.emit(uid, uname)
+        elif chosen == act_mail:
+            self.sig_mail_user.emit(uid, uname)
+
+    def _on_user_dblclick(self, item):
+        uid   = item.data(Qt.UserRole)
+        uname = item.data(Qt.UserRole + 1)
+        if uid is not None and uid != self.parent_user_id():
+            self.sig_open_dm.emit(uid, uname)
+
+    def parent_user_id(self):
+        return getattr(self, '_my_user_id', 0)
+
+    def set_my_user_id(self, uid):
+        self._my_user_id = uid
+
+    def _on_dm_clicked(self, item):
+        room_id = item.data(Qt.UserRole)
+        if room_id is not None and room_id != self._current_room:
+            self._pending_room = room_id
+            self.sig_join_room.emit(room_id)
+
+    def add_dm_room(self, room_id: int, display_name: str):
+        if room_id not in self._dm_rooms:
+            self._dm_rooms[room_id] = display_name
+            item = QListWidgetItem(f'@ {display_name}')
+            item.setData(Qt.UserRole, room_id)
+            self.dm_list.addItem(item)
+        # Register as a room so show_history can title it
+        self._rooms[room_id] = (room_id, display_name, 2, 0)
 
     def get_room(self, room_id: int):
         return self._rooms.get(room_id)
@@ -618,13 +689,192 @@ class ChatWidget(QWidget):
         self.inp_msg.setFocus()
 
 # ---------------------------------------------------------------------------
+#  Compose Mail dialog
+# ---------------------------------------------------------------------------
+
+class ComposeMailDialog(QDialog):
+    """Compose a mail message. recipient may be pre-filled (from a user) or
+    chosen by typing a username (offline send)."""
+    sig_send = Signal(int, str, str)   # recipient_id (0=by name), recipient_name, body
+
+    def __init__(self, recipient_id=0, recipient_name='', parent=None):
+        super().__init__(parent)
+        self._recipient_id = recipient_id
+        self.setWindowTitle('Compose Mail')
+        self.setMinimumSize(420, 320)
+        self.setModal(False)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(10)
+
+        to_lbl = QLabel('To:')
+        to_lbl.setStyleSheet(f'color: {COL_MUTED}; font-size: 12px;')
+        lay.addWidget(to_lbl)
+
+        self.inp_to = QLineEdit()
+        self.inp_to.setPlaceholderText('username')
+        if recipient_name:
+            self.inp_to.setText(recipient_name)
+            if recipient_id:
+                self.inp_to.setReadOnly(True)
+        lay.addWidget(self.inp_to)
+
+        msg_lbl = QLabel('Message:')
+        msg_lbl.setStyleSheet(f'color: {COL_MUTED}; font-size: 12px;')
+        lay.addWidget(msg_lbl)
+
+        self.inp_body = QPlainTextEdit()
+        self.inp_body.setPlaceholderText('Type your message...')
+        lay.addWidget(self.inp_body)
+
+        btnrow = QHBoxLayout()
+        btnrow.addStretch()
+        btn_cancel = QPushButton('Cancel')
+        btn_cancel.clicked.connect(self.reject)
+        btnrow.addWidget(btn_cancel)
+        btn_send = QPushButton('Send')
+        btn_send.setObjectName('btn_primary')
+        btn_send.clicked.connect(self._on_send)
+        btnrow.addWidget(btn_send)
+        lay.addLayout(btnrow)
+
+    def _on_send(self):
+        to_name = self.inp_to.text().strip()
+        body    = self.inp_body.toPlainText().strip()
+        if not to_name or not body:
+            return
+        self.sig_send.emit(self._recipient_id, to_name, body)
+        self.accept()
+
+
+# ---------------------------------------------------------------------------
+#  Mailbox window
+# ---------------------------------------------------------------------------
+
+class MailboxDialog(QDialog):
+    """Standalone mailbox window: list of mail, read pane, delete, compose."""
+    sig_read    = Signal(int)        # mail_id
+    sig_delete  = Signal(int)        # mail_id
+    sig_compose = Signal()           # request compose dialog
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Mailbox')
+        self.setMinimumSize(640, 420)
+        self.setModal(False)
+        self._mails = []   # list of dicts
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(8)
+
+        # Toolbar
+        tools = QHBoxLayout()
+        title = QLabel('Mailbox')
+        title.setStyleSheet(f'color: {COL_ACCENT}; font-size: 15px; font-weight: bold;')
+        tools.addWidget(title)
+        tools.addStretch()
+        btn_compose = QPushButton('Compose')
+        btn_compose.setObjectName('btn_primary')
+        btn_compose.clicked.connect(self.sig_compose)
+        tools.addWidget(btn_compose)
+        lay.addLayout(tools)
+
+        # Split: list on left, read pane on right
+        split = QSplitter(Qt.Horizontal)
+
+        self.list = QListWidget()
+        self.list.setMinimumWidth(220)
+        self.list.currentRowChanged.connect(self._on_row)
+        split.addWidget(self.list)
+
+        right = QWidget()
+        rlay = QVBoxLayout(right)
+        rlay.setContentsMargins(8, 0, 0, 0)
+        self.lbl_from = QLabel('')
+        self.lbl_from.setStyleSheet(f'color: {COL_PURPLE}; font-weight: bold;')
+        rlay.addWidget(self.lbl_from)
+        self.lbl_ts = QLabel('')
+        self.lbl_ts.setStyleSheet(f'color: {COL_MUTED}; font-size: 11px;')
+        rlay.addWidget(self.lbl_ts)
+        self.body = QTextEdit()
+        self.body.setReadOnly(True)
+        rlay.addWidget(self.body)
+        delrow = QHBoxLayout()
+        delrow.addStretch()
+        self.btn_reply = QPushButton('Reply')
+        self.btn_reply.clicked.connect(self._on_reply)
+        delrow.addWidget(self.btn_reply)
+        self.btn_delete = QPushButton('Delete')
+        self.btn_delete.clicked.connect(self._on_delete)
+        delrow.addWidget(self.btn_delete)
+        rlay.addLayout(delrow)
+        split.addWidget(right)
+        split.setStretchFactor(0, 0)
+        split.setStretchFactor(1, 1)
+        lay.addWidget(split)
+
+        self.sig_reply_to = None  # set when reply pressed -- read by MainWindow
+
+    def set_mails(self, mails: list):
+        self._mails = list(mails)
+        self.list.clear()
+        for m in self._mails:
+            item = QListWidgetItem(f"{m['sender']}  ({m['ts']})")
+            self.list.addItem(item)
+        if self._mails:
+            self.list.setCurrentRow(0)
+        else:
+            self.lbl_from.setText('')
+            self.lbl_ts.setText('')
+            self.body.clear()
+
+    def _on_row(self, row: int):
+        if row < 0 or row >= len(self._mails):
+            return
+        m = self._mails[row]
+        self.lbl_from.setText(f"From: {m['sender']}")
+        self.lbl_ts.setText(m['ts'])
+        self.body.setPlainText(m['body'])
+        self.sig_read.emit(m['mail_id'])
+
+    def _current_mail(self):
+        row = self.list.currentRow()
+        if 0 <= row < len(self._mails):
+            return self._mails[row]
+        return None
+
+    def _on_delete(self):
+        m = self._current_mail()
+        if not m:
+            return
+        self.sig_delete.emit(m['mail_id'])
+        # Remove locally
+        row = self.list.currentRow()
+        self._mails.pop(row)
+        self.list.takeItem(row)
+        if self._mails:
+            self.list.setCurrentRow(min(row, len(self._mails) - 1))
+        else:
+            self.lbl_from.setText(''); self.lbl_ts.setText(''); self.body.clear()
+
+    def _on_reply(self):
+        m = self._current_mail()
+        if not m:
+            return
+        self.sig_reply_to = m['sender']
+        self.sig_compose.emit()
+
+
+# ---------------------------------------------------------------------------
 #  Main window
 # ---------------------------------------------------------------------------
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle('SceneChat v1.2')
+        self.setWindowTitle('SceneChat v1.3')
         self.setMinimumSize(900, 600)
         self.resize(1100, 700)
 
@@ -633,6 +883,8 @@ class MainWindow(QMainWindow):
         self._do_register = False
         self._username  = ''
         self._server    = ''
+        self._mailbox_win = None
+        self._mails       = []
 
         self._login_widget = LoginWidget()
         self._chat_widget  = ChatWidget()
@@ -656,6 +908,9 @@ class MainWindow(QMainWindow):
         self._chat_widget.sig_join_room.connect(self._on_join_room)
         self._chat_widget.sig_send.connect(self._on_send_message)
         self._chat_widget.sig_logout.connect(self._on_logout)
+        self._chat_widget.sig_open_dm.connect(self._on_open_dm)
+        self._chat_widget.sig_mail_user.connect(self._on_mail_user)
+        self._chat_widget.sig_open_mailbox.connect(self._on_open_mailbox)
 
         # Prefill saved creds
         creds = load_creds()
@@ -727,6 +982,8 @@ class MainWindow(QMainWindow):
         self._worker.sig_user_list.connect(self._on_user_list)
         self._worker.sig_user_join.connect(self._on_user_join)
         self._worker.sig_user_leave.connect(self._on_user_leave)
+        self._worker.sig_dm_room.connect(self._on_dm_room)
+        self._worker.sig_mail_list.connect(self._on_mail_list)
         self._worker.sig_error.connect(self._on_error)
         self._worker.sig_disconnected.connect(self._on_disconnected)
         self._worker.start()
@@ -751,6 +1008,11 @@ class MainWindow(QMainWindow):
             return
         display = username if username else self._username
         self._chat_widget.set_user(display)
+        self._chat_widget.set_my_user_id(user_id)
+        # Fresh login -- clear any leftover DM/mail state
+        self._mails = []
+        self._chat_widget._dm_rooms = {}
+        self._chat_widget.dm_list.clear()
         save_creds(self._server, self._username, self._password)
         EMOJI_CACHE.mkdir(exist_ok=True)
         QTimer.singleShot(500, lambda: _ensure_emoji_cache(self._server))
@@ -839,6 +1101,68 @@ class MainWindow(QMainWindow):
         self._chat_widget.add_user(user_id, username, room_id)
 
     @Slot(int, str)
+    def _on_open_dm(self, user_id: int, username: str):
+        if self._worker:
+            self._worker.send_dm_open(user_id)
+            self.status_bar.showMessage(f'Opening DM with {username}...')
+
+    def _on_dm_room(self, room_id: int, display_name: str):
+        # display_name comes as "DM:username" from server -- strip prefix
+        name = display_name[3:] if display_name.startswith('DM:') else display_name
+        self._chat_widget.add_dm_room(room_id, name)
+
+    def _on_mail_user(self, user_id: int, username: str):
+        dlg = ComposeMailDialog(recipient_id=user_id, recipient_name=username, parent=self)
+        dlg.sig_send.connect(self._do_send_mail)
+        dlg.show()
+
+    def _on_open_mailbox(self):
+        if self._mailbox_win is None:
+            self._mailbox_win = MailboxDialog(self)
+            self._mailbox_win.sig_read.connect(self._on_mail_read)
+            self._mailbox_win.sig_delete.connect(self._on_mail_delete)
+            self._mailbox_win.sig_compose.connect(self._on_compose_from_mailbox)
+        self._mailbox_win.set_mails(self._mails)
+        self._mailbox_win.show()
+        self._mailbox_win.raise_()
+        self._mailbox_win.activateWindow()
+
+    def _on_compose_from_mailbox(self):
+        reply_to = ''
+        if self._mailbox_win and self._mailbox_win.sig_reply_to:
+            reply_to = self._mailbox_win.sig_reply_to
+            self._mailbox_win.sig_reply_to = None
+        dlg = ComposeMailDialog(recipient_id=0, recipient_name=reply_to, parent=self)
+        dlg.sig_send.connect(self._do_send_mail)
+        dlg.show()
+
+    def _do_send_mail(self, recipient_id: int, recipient_name: str, body: str):
+        if not self._worker:
+            return
+        if recipient_id != 0:
+            self._worker.send_mail(recipient_id, body)
+        else:
+            # send by name -- encode TO:name\nbody for the server to resolve
+            self._worker.send_mail(0, f'TO:{recipient_name}\n{body}')
+        self.status_bar.showMessage(f'Mail sent to {recipient_name}')
+
+    def _on_mail_list(self, mails: list):
+        # Accumulate mail and refresh the mailbox window if open
+        self._mails.extend(mails)
+        if self._mails:
+            self.status_bar.showMessage(f'{len(self._mails)} message(s) in mailbox')
+        if self._mailbox_win and self._mailbox_win.isVisible():
+            self._mailbox_win.set_mails(self._mails)
+
+    def _on_mail_read(self, mail_id: int):
+        if self._worker:
+            self._worker.send_mail_read(mail_id)
+
+    def _on_mail_delete(self, mail_id: int):
+        if self._worker:
+            self._worker.send_mail_delete(mail_id)
+        self._mails = [m for m in self._mails if m['mail_id'] != mail_id]
+
     def _on_user_leave(self, user_id: int, username: str):
         self._chat_widget.remove_user(user_id)
 
@@ -853,6 +1177,13 @@ class MainWindow(QMainWindow):
             self._worker.quit()
             self._worker.wait()
             self._worker = None
+        # Reset DM/mail state so a different account doesn't see stale data
+        self._mails = []
+        if self._mailbox_win:
+            self._mailbox_win.close()
+            self._mailbox_win = None
+        self._chat_widget._dm_rooms = {}
+        self._chat_widget.dm_list.clear()
         self._login_widget.set_busy(False)
         self._login_widget.set_status('')
         self._show_login()

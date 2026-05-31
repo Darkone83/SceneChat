@@ -65,12 +65,18 @@ SCCP_MSG_DELETE  = 0x19
 SCCP_USER_LIST   = 0x11
 SCCP_USER_JOIN   = 0x12
 SCCP_USER_LEAVE  = 0x13
+SCCP_DM_OPEN     = 0x14
+SCCP_MAIL_LIST   = 0x15
+SCCP_MAIL_SEND   = 0x16
+SCCP_MAIL_READ   = 0x17
+SCCP_MAIL_DELETE = 0x18
+SCCP_UPDATE_AVAIL = 0x1A
 
 # -- Database configuration ----------------------------------------------------
 DB_CONFIG = {
     'host':     'localhost',
-    'user':     'scenechat',
-    'password': 'XbSceneChat01!',
+    'user':     'youruser',
+    'password': 'yourpass',
     'database': 'scenechat'
 }
 
@@ -156,6 +162,257 @@ async def send_user_list(writer, lock, session_key):
         payload += pack_string8(c['username'])
         payload += bytes([room_id])
     await write_encrypted(writer, lock, session_key, SCCP_USER_LIST, payload)
+
+# -- DM room delivery --------------------------------------------------------
+async def send_dm_rooms(writer, lock, session_key, user_id):
+    """Send ROOM_INFO for each existing DM room the user participates in."""
+    try:
+        db     = get_db()
+        cursor = db.cursor()
+        cursor.execute("""
+            SELECT r.id, r.name
+            FROM rooms r
+            JOIN room_participants p ON p.room_id = r.id
+            WHERE r.type = 'dm' AND p.user_id = %s
+        """, (user_id,))
+        dm_rooms = cursor.fetchall()
+        for room_id, room_name in dm_rooms:
+            # Get the other participant's username as the display name
+            cursor.execute("""
+                SELECT u.username FROM users u
+                JOIN room_participants p ON p.user_id = u.id
+                WHERE p.room_id = %s AND u.id != %s
+            """, (room_id, user_id))
+            other = cursor.fetchone()
+            display = f"DM:{other[0]}" if other else room_name
+            # Build a minimal ROOM_INFO packet for this DM room
+            # [room_id 1B][type 1B][name str8][msg_count 1B]
+            payload  = bytes([room_id, 0x02])  # type=2 reserved for DM
+            payload += pack_string8(display)
+            payload += bytes([0])  # 0 history entries -- client loads on open
+            await write_encrypted(writer, lock, session_key,
+                                  SCCP_ROOM_INFO, payload)
+    except Exception as e:
+        log.error(f"send_dm_rooms error: {e}")
+    finally:
+        try: cursor.close()
+        except: pass
+        try: db.close()
+        except: pass
+
+
+# -- Mailbox helpers ---------------------------------------------------------
+async def send_mail_list(writer, lock, session_key, user_id):
+    """Send unread mailbox items to client on login."""
+    try:
+        db     = get_db()
+        cursor = db.cursor()
+        cursor.execute("""
+            SELECT m.id, u.username, m.content, m.sent_at
+            FROM mailbox m
+            JOIN users u ON u.id = m.sender_id
+            WHERE m.recipient_id = %s AND m.is_deleted = 0 AND m.is_read = 0
+            ORDER BY m.sent_at ASC
+        """, (user_id,))
+        rows = cursor.fetchall()
+        if not rows:
+            return
+        payload = struct.pack('>H', len(rows))
+        for row in rows:
+            mail_id, sender, content, sent_at = row
+            ts = sent_at.strftime('%H:%M') if sent_at else '??:??'
+            payload += struct.pack('>I', mail_id)
+            payload += pack_string8(sender)
+            payload += pack_string16(content)
+            payload += pack_string8(ts)
+        await write_encrypted(writer, lock, session_key, SCCP_MAIL_LIST, payload)
+    except Exception as e:
+        log.error(f"send_mail_list error: {e}")
+    finally:
+        try: cursor.close()
+        except: pass
+        try: db.close()
+        except: pass
+
+
+# -- DM handler ---------------------------------------------------------------
+async def handle_dm_open(writer, lock, session_key, payload, client_id):
+    """Open or create a DM room between client_id and target_user_id."""
+    if not client_id or client_id not in connected_clients:
+        return
+    try:
+        target_id = struct.unpack_from('>I', payload, 0)[0]
+        if target_id == client_id:
+            await send_error(writer, lock, session_key, 'Cannot DM yourself')
+            return
+
+        db     = get_db()
+        cursor = db.cursor()
+
+        # Verify target user exists
+        cursor.execute("SELECT id, username FROM users WHERE id = %s AND is_banned = 0", (target_id,))
+        target = cursor.fetchone()
+        if not target:
+            await send_error(writer, lock, session_key, 'User not found')
+            return
+
+        # Check if DM room already exists between these two users
+        cursor.execute("""
+            SELECT r.id, r.name FROM rooms r
+            JOIN room_participants p1 ON p1.room_id = r.id AND p1.user_id = %s
+            JOIN room_participants p2 ON p2.room_id = r.id AND p2.user_id = %s
+            WHERE r.type = 'dm'
+            LIMIT 1
+        """, (client_id, target_id))
+        existing = cursor.fetchone()
+
+        if existing:
+            room_id, room_name = existing
+        else:
+            # Create new DM room
+            my_username = connected_clients[client_id]['username']
+            room_name   = f'dm_{min(client_id, target_id)}_{max(client_id, target_id)}'
+            cursor.execute(
+                "INSERT INTO rooms (name, type) VALUES (%s, 'dm')",
+                (room_name,)
+            )
+            room_id = cursor.lastrowid
+            cursor.execute(
+                "INSERT INTO room_participants (room_id, user_id) VALUES (%s, %s), (%s, %s)",
+                (room_id, client_id, room_id, target_id)
+            )
+            db.commit()
+            log.info(f"DM room created: id={room_id} between {client_id} and {target_id}")
+
+        # Send ROOM_INFO for the DM room to the requesting client
+        # Reuse join room flow
+        fake_payload = bytes([room_id, 0])  # room_id + pass_len=0
+        await handle_join_room(writer, lock, session_key, fake_payload, client_id)
+
+        # If target is online, notify them too
+        if target_id in connected_clients:
+            tc = connected_clients[target_id]
+            fake_payload2 = bytes([room_id, 0])
+            await handle_join_room(
+                tc['writer'], tc['lock'], tc['session_key'],
+                fake_payload2, target_id
+            )
+
+    except Exception as e:
+        log.error(f"handle_dm_open error: {e}", exc_info=True)
+    finally:
+        try: cursor.close()
+        except: pass
+        try: db.close()
+        except: pass
+
+
+# -- Mail handlers ------------------------------------------------------------
+async def handle_mail_send(writer, lock, session_key, payload, client_id):
+    """Store a mail message from client_id to target user."""
+    if not client_id:
+        return
+    try:
+        pos = 0
+        recipient_id = struct.unpack_from('>I', payload, pos)[0]; pos += 4
+        content, _   = unpack_string16(payload, pos)
+
+        db     = get_db()
+        cursor = db.cursor()
+
+        # recipient_id == 0 means the Xbox client could not resolve the
+        # username locally (recipient offline). The content is encoded as
+        # "TO:username\nbody" -- parse the username and resolve to an id.
+        if recipient_id == 0 and content.startswith('TO:'):
+            nl = content.find('\n')
+            if nl > 3:
+                target_name = content[3:nl].strip()
+                content     = content[nl+1:]
+                cursor.execute(
+                    "SELECT id FROM users WHERE username = %s AND is_banned = 0",
+                    (target_name,)
+                )
+                row = cursor.fetchone()
+                if not row:
+                    await send_error(writer, lock, session_key, 'User not found')
+                    return
+                recipient_id = row[0]
+            else:
+                await send_error(writer, lock, session_key, 'Bad recipient')
+                return
+
+        # Verify recipient
+        cursor.execute("SELECT id FROM users WHERE id = %s AND is_banned = 0", (recipient_id,))
+        if not cursor.fetchone():
+            await send_error(writer, lock, session_key, 'User not found')
+            return
+
+        cursor.execute(
+            "INSERT INTO mailbox (sender_id, recipient_id, content) VALUES (%s, %s, %s)",
+            (client_id, recipient_id, content)
+        )
+        db.commit()
+        log.info(f"Mail sent: from={client_id} to={recipient_id}")
+
+        # If recipient is online, deliver immediately
+        if recipient_id in connected_clients:
+            rc = connected_clients[recipient_id]
+            await send_mail_list(
+                rc['writer'], rc['lock'], rc['session_key'], recipient_id
+            )
+
+    except Exception as e:
+        log.error(f"handle_mail_send error: {e}", exc_info=True)
+    finally:
+        try: cursor.close()
+        except: pass
+        try: db.close()
+        except: pass
+
+
+async def handle_mail_read(payload, client_id):
+    """Mark a mail item as read."""
+    if not client_id:
+        return
+    try:
+        mail_id = struct.unpack_from('>I', payload, 0)[0]
+        db     = get_db()
+        cursor = db.cursor()
+        cursor.execute(
+            "UPDATE mailbox SET is_read = 1 WHERE id = %s AND recipient_id = %s",
+            (mail_id, client_id)
+        )
+        db.commit()
+    except Exception as e:
+        log.error(f"handle_mail_read error: {e}")
+    finally:
+        try: cursor.close()
+        except: pass
+        try: db.close()
+        except: pass
+
+
+async def handle_mail_delete(payload, client_id):
+    """Soft-delete a mail item."""
+    if not client_id:
+        return
+    try:
+        mail_id = struct.unpack_from('>I', payload, 0)[0]
+        db     = get_db()
+        cursor = db.cursor()
+        cursor.execute(
+            "UPDATE mailbox SET is_deleted = 1 WHERE id = %s AND recipient_id = %s",
+            (mail_id, client_id)
+        )
+        db.commit()
+    except Exception as e:
+        log.error(f"handle_mail_delete error: {e}")
+    finally:
+        try: cursor.close()
+        except: pass
+        try: db.close()
+        except: pass
+
 
 # -- scene_bot constants -------------------------------------------------------
 SCENE_BOT_ID       = 12
@@ -440,9 +697,11 @@ async def handle_room_list(writer, lock, session_key, client_id=None):
         is_mod   = caller_role in ('moderator', 'admin')
         is_admin = caller_role == 'admin'
 
-        # Filter rooms by access_level
+        # Filter rooms by access_level; never include DM rooms in public list
         visible = []
         for row in rows:
+            if row[2] == 'dm':
+                continue  # DM rooms are private, never in room list
             acl = row[4]  # access_level
             if acl == 'public':
                 visible.append(row)
@@ -535,9 +794,28 @@ async def handle_join_room(writer, lock, session_key, payload, client_id):
         """, (room_id,))
         rows = list(reversed(cursor.fetchall()))
 
-        room_type = 0x01 if room[2] == 'voice' else 0x00
+        if room[2] == 'voice':
+            room_type = 0x01
+        elif room[2] == 'dm':
+            room_type = 0x02
+        else:
+            room_type = 0x00
+
+        # For DM rooms, display the other participant's name, not the
+        # internal dm_x_y room name.
+        display_name = room[1]
+        if room[2] == 'dm':
+            cursor.execute("""
+                SELECT u.username FROM users u
+                JOIN room_participants p ON p.user_id = u.id
+                WHERE p.room_id = %s AND u.id != %s
+            """, (room_id, client_id))
+            other = cursor.fetchone()
+            if other:
+                display_name = f"DM:{other[0]}"
+
         out  = bytes([room[0], room_type])
-        out += pack_string8(room[1])
+        out += pack_string8(display_name)
         out += bytes([len(rows)])
         for row in rows:
             ts   = row[3].strftime('%H:%M')
@@ -677,7 +955,7 @@ async def handle_bot_command(content: str, room_id: int, client_id: int):
     # -- /version --------------------------------------------------------------
     if cmd == '/version':
         await bot_reply(room_id,
-            '[scene_bot] SceneChat Server v1.2 | Protocol SCCP | Team Resurgent / Darkone83',
+            '[scene_bot] SceneChat Server v1.3 | Protocol SCCP | Team Resurgent / Darkone83',
             client_id)
         return True
 
@@ -985,18 +1263,38 @@ async def handle_message(writer, lock, session_key, payload, client_id):
         broadcast += pack_string16(content)
         broadcast += pack_string8(ts)
 
+        # Check if this is a DM room -- restrict to participants only
+        cursor.execute("SELECT type FROM rooms WHERE id = %s", (room_id,))
+        room_row = cursor.fetchone()
+        is_dm = room_row and room_row[0] == 'dm'
+
+        if is_dm:
+            cursor.execute(
+                "SELECT user_id FROM room_participants WHERE room_id = %s",
+                (room_id,)
+            )
+            dm_participants = {row[0] for row in cursor.fetchall()}
+        
         sent = 0
         for uid, client in list(connected_clients.items()):
-            if client['room'] == room_id:
-                try:
-                    await write_encrypted(
-                        client['writer'], client['lock'],
-                        client['session_key'],
-                        SCCP_MSG_RECV, broadcast
-                    )
-                    sent += 1
-                except Exception as be:
-                    log.warning(f"broadcast to {uid} failed: {be}")
+            if is_dm:
+                # DM: deliver to every online participant regardless of which
+                # room they currently have focused.
+                if uid not in dm_participants:
+                    continue
+            else:
+                # Regular room: deliver to clients currently in that room.
+                if client['room'] != room_id:
+                    continue
+            try:
+                await write_encrypted(
+                    client['writer'], client['lock'],
+                    client['session_key'],
+                    SCCP_MSG_RECV, broadcast
+                )
+                sent += 1
+            except Exception as be:
+                log.warning(f"broadcast to {uid} failed: {be}")
         log.debug(f"MESSAGE broadcast to {sent} clients")
 
     except Exception as e:
@@ -1045,6 +1343,10 @@ async def handle_client(reader, writer):
                         'session_key': session_key,
                         'room':        None
                     }
+                    # Deliver existing DM rooms
+                    await send_dm_rooms(writer, lock, session_key, client_id)
+                    # Deliver unread mail
+                    await send_mail_list(writer, lock, session_key, client_id)
                     # Broadcast join to all other clients
                     await broadcast_user_join(client_id, username, None)
 
@@ -1061,6 +1363,18 @@ async def handle_client(reader, writer):
             elif pkt_type == SCCP_PING:
                 log.debug(f"PING from {addr}, sending PONG")
                 await write_packet(writer, lock, SCCP_PONG)
+
+            elif pkt_type == SCCP_DM_OPEN:
+                await handle_dm_open(writer, lock, session_key, payload, client_id)
+
+            elif pkt_type == SCCP_MAIL_SEND:
+                await handle_mail_send(writer, lock, session_key, payload, client_id)
+
+            elif pkt_type == SCCP_MAIL_READ:
+                await handle_mail_read(payload, client_id)
+
+            elif pkt_type == SCCP_MAIL_DELETE:
+                await handle_mail_delete(payload, client_id)
 
             else:
                 log.warning(f"Unknown pkt_type=0x{pkt_type:02X} from {addr}")

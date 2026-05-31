@@ -17,6 +17,7 @@ public record RoomInfo(int Id, string Name, int Type, int PasswordFlag = 0);
 public record ChatMessage(int RoomId, string Username, string Content, string Timestamp, int MsgId = 0);
 public record UserInfo(int UserId, string Username, int RoomId);
 public record HistoryMessage(string Username, string Content, string Timestamp, int MsgId = 0);
+public record MailItem(int MailId, string Sender, string Body, string Timestamp);
 
 // ── Client ────────────────────────────────────────────────────────────────────
 
@@ -36,6 +37,8 @@ public class ChatClient : IAsyncDisposable
     public event Action<UserInfo>? OnUserJoin;
     public event Action<int, string>? OnUserLeave;       // userId, username
     public event Action<string>? OnJoinFail;        // reason
+    public event Action<int, string>? OnDmRoom;          // roomId, displayName (type==2)
+    public event Action<List<MailItem>>? OnMailList;
 
     // ── State ─────────────────────────────────────────────────────────────────
     private TcpClient? _tcp;
@@ -318,6 +321,7 @@ public class ChatClient : IAsyncDisposable
             case ScProtocol.USER_LIST: HandleUserList(payload); break;
             case ScProtocol.USER_JOIN: HandleUserJoin(payload); break;
             case ScProtocol.USER_LEAVE: HandleUserLeave(payload); break;
+            case ScProtocol.MAIL_LIST: HandleMailList(payload); break;
             case ScProtocol.PONG: break;
         }
         return Task.CompletedTask;
@@ -380,8 +384,7 @@ public class ChatClient : IAsyncDisposable
         _joiningRoom = false;
         int pos = 0;
         int roomId = payload[pos++];
-        /* type */
-        pos++;
+        int roomType = payload[pos++];
         var (name, p2) = ScProtocol.UnpackString8(payload, pos); pos = p2;
         int count = payload[pos++];
         var history = new List<HistoryMessage>(count);
@@ -394,7 +397,26 @@ public class ChatClient : IAsyncDisposable
             var (ts, p5) = ScProtocol.UnpackString8(payload, pos); pos = p5;
             history.Add(new HistoryMessage(user, content, ts, msgId));
         }
+        if (roomType == 2)
+            OnDmRoom?.Invoke(roomId, name);
         OnRoomJoined?.Invoke(roomId, name, history);
+    }
+
+    private void HandleMailList(byte[] payload)
+    {
+        int pos = 0;
+        int count = (payload[pos] << 8) | payload[pos + 1]; pos += 2;
+        var mails = new List<MailItem>(count);
+        for (int i = 0; i < count; i++)
+        {
+            int mailId = (payload[pos] << 24) | (payload[pos + 1] << 16) |
+                         (payload[pos + 2] << 8) | payload[pos + 3]; pos += 4;
+            var (sender, p1) = ScProtocol.UnpackString8(payload, pos); pos = p1;
+            var (body, p2) = ScProtocol.UnpackString16(payload, pos); pos = p2;
+            var (ts, p3) = ScProtocol.UnpackString8(payload, pos); pos = p3;
+            mails.Add(new MailItem(mailId, sender, body, ts));
+        }
+        OnMailList?.Invoke(mails);
     }
 
     private void HandleMsgRecv(byte[] payload)
@@ -448,6 +470,48 @@ public class ChatClient : IAsyncDisposable
     public Task SendMessageAsync(int roomId, string content)
         => WriteEncryptedAsync(ScProtocol.MESSAGE,
             ScProtocol.Combine([(byte)roomId], ScProtocol.PackString16(content)));
+
+    public Task SendDmOpenAsync(int targetUserId)
+    {
+        _joiningRoom = true;  // DM open returns a ROOM_INFO we want to join
+        var payload = new byte[4];
+        payload[0] = (byte)((targetUserId >> 24) & 0xFF);
+        payload[1] = (byte)((targetUserId >> 16) & 0xFF);
+        payload[2] = (byte)((targetUserId >> 8) & 0xFF);
+        payload[3] = (byte)(targetUserId & 0xFF);
+        return WriteEncryptedAsync(ScProtocol.DM_OPEN, payload);
+    }
+
+    public Task SendMailAsync(int recipientId, string body)
+    {
+        var idBytes = new byte[4];
+        idBytes[0] = (byte)((recipientId >> 24) & 0xFF);
+        idBytes[1] = (byte)((recipientId >> 16) & 0xFF);
+        idBytes[2] = (byte)((recipientId >> 8) & 0xFF);
+        idBytes[3] = (byte)(recipientId & 0xFF);
+        return WriteEncryptedAsync(ScProtocol.MAIL_SEND,
+            ScProtocol.Combine(idBytes, ScProtocol.PackString16(body)));
+    }
+
+    public Task SendMailReadAsync(int mailId)
+    {
+        var b = new byte[4];
+        b[0] = (byte)((mailId >> 24) & 0xFF);
+        b[1] = (byte)((mailId >> 16) & 0xFF);
+        b[2] = (byte)((mailId >> 8) & 0xFF);
+        b[3] = (byte)(mailId & 0xFF);
+        return WriteEncryptedAsync(ScProtocol.MAIL_READ, b);
+    }
+
+    public Task SendMailDeleteAsync(int mailId)
+    {
+        var b = new byte[4];
+        b[0] = (byte)((mailId >> 24) & 0xFF);
+        b[1] = (byte)((mailId >> 16) & 0xFF);
+        b[2] = (byte)((mailId >> 8) & 0xFF);
+        b[3] = (byte)(mailId & 0xFF);
+        return WriteEncryptedAsync(ScProtocol.MAIL_DELETE, b);
+    }
 
     public Task RequestRoomListAsync()
         => WriteEncryptedAsync(ScProtocol.ROOM_LIST, []);

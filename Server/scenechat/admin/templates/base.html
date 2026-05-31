@@ -71,6 +71,14 @@
             padding-bottom: 12px;
         }
 
+        .section-title {
+            color: #39ff14;
+            font-size: 1em;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 16px;
+        }
+
         .card {
             background: #111;
             border: 1px solid #222;
@@ -217,11 +225,14 @@
     		<a href="{{ url_for('users') }}" {% if request.endpoint == 'users' %}class="active"{% endif %}>Users</a>
     		{% if session.role in ('superadmin', 'admin') %}
     		<a href="{{ url_for('rooms') }}" {% if request.endpoint == 'rooms' %}class="active"{% endif %}>Rooms</a>
+    		<a href="{{ url_for('dms') }}" {% if request.endpoint == 'dms' %}class="active"{% endif %}>DMs</a>
     		{% endif %}
     		<span style="color: #333; margin-left: 24px; font-size: 0.85em;">{{ session.display_name }}</span>
     		<a href="{{ url_for('logs') }}" {% if request.endpoint == 'logs' %}class="active"{% endif %}>Logs</a>
 		<a href="{{ url_for('maintenance') }}" {% if request.endpoint == 'maintenance' %}class="active"{% endif %}>Maintenance</a>
 		<a href="{{ url_for('online_users') }}" {% if request.endpoint == 'online_users' %}class="active"{% endif %}>Online</a>
+		<a href="{{ url_for('mailbox') }}" {% if request.endpoint == 'mailbox' %}class="active"{% endif %}>Mailbox</a>
+		<a href="{{ url_for('update_mgmt') }}" {% if request.endpoint == 'update_mgmt' %}class="active"{% endif %}>Update</a>
     		<a href="{{ url_for('logout') }}">Logout</a>
 		</div>    
 	</nav>

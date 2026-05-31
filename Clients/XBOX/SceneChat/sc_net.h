@@ -48,6 +48,12 @@ extern "C" {
 #define SCCP_USER_LIST      0x11
 #define SCCP_USER_JOIN      0x12
 #define SCCP_USER_LEAVE     0x13
+#define SCCP_DM_OPEN        0x14
+#define SCCP_MAIL_LIST      0x15
+#define SCCP_MAIL_SEND      0x16
+#define SCCP_MAIL_READ      0x17
+#define SCCP_MAIL_DELETE    0x18
+#define SCCP_UPDATE_AVAIL   0x1A
 
 /* ── Constants ────────────────────────────────────────────────────────────── */
 #define SC_SERVER_PORT       8943
@@ -63,6 +69,8 @@ extern "C" {
 #define SC_POLY_TAG_LEN      16
 #define SC_PACKET_QUEUE_SIZE 32  /* increased for v1.2 presence packets */
 #define SC_MAX_USERS         64   /* max online users tracked          */
+#define SC_MAX_MAIL          32   /* max mail items in inbox           */
+#define SC_MAX_MAIL_BODY     500  /* max mail body length              */
 
 /* ── Connect states ───────────────────────────────────────────────────────── */
 #define SC_STATE_IDLE        0
@@ -94,6 +102,15 @@ extern "C" {
         unsigned char room_id;               /* 0=not in a room               */
         char          username[SC_MAX_USERNAME];
     } SC_User;
+
+    /* ── Mail descriptor ────────────────────────────────────────────────────── */
+    typedef struct
+    {
+        unsigned int  mail_id;
+        char          sender[SC_MAX_USERNAME];
+        char          body[SC_MAX_MAIL_BODY];
+        char          timestamp[8];
+    } SC_Mail;
 
     /* ── Message descriptor ───────────────────────────────────────────────────── */
     typedef struct
@@ -164,6 +181,15 @@ extern "C" {
     int SC_Net_RecvUserList(SC_User* users, int* count);
     int SC_Net_RecvUserJoin(SC_User* pOut);
     int SC_Net_RecvUserLeave(unsigned int* pUserId, char* username, int bufLen);
+    /* v1.3 -- OTA update notification */
+    int SC_Net_RecvUpdateAvail(char* versionBuf, int bufLen);
+    /* v1.3 -- Direct messages */
+    int SC_Net_SendDmOpen(unsigned int target_user_id);
+    /* v1.3 -- Mailbox */
+    int SC_Net_RecvMailList(SC_Mail* mails, int* count);
+    int SC_Net_SendMailSend(unsigned int recipient_id, const char* body);
+    int SC_Net_SendMailRead(unsigned int mail_id);
+    int SC_Net_SendMailDelete(unsigned int mail_id);
     /* Returns 1 if server rejected a room join (wrong password or access denied) */
     int SC_Net_RecvJoinFail(char* reason, int bufLen);
 

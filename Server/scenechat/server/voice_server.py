@@ -5,8 +5,8 @@ from datetime import datetime
 
 DB_CONFIG = {
     'host': 'localhost',
-    'user': 'scenechat',
-    'password': 'XbSceneChat01!',
+    'user': 'youruser',
+    'password': 'yourpass',
     'database': 'scenechat'
 }
 

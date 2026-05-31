@@ -19,16 +19,19 @@
 #include "screen_kb.h"
 #include "input.h"
 #include "creds.h"
+#include "sc_update.h"
 #include <string.h>
 
 /*    States                                                                   */
 
-#define ST_CONNECTING   0
-#define ST_LOGIN        1
-#define ST_REGISTER     2
-#define ST_WAITING      3
-#define ST_ERROR        4
-#define ST_DONE         5
+#define ST_UPDATE_CHECK 0   /* HTTP version check before connect     */
+#define ST_UPDATE       1   /* update in progress / prompt           */
+#define ST_CONNECTING   2
+#define ST_LOGIN        3
+#define ST_REGISTER     4
+#define ST_WAITING      5
+#define ST_ERROR        6
+#define ST_DONE         7
 
 /*    Field indices                                                            */
 
@@ -67,7 +70,8 @@
 
 /*    Internal state                                                           */
 
-static int   s_state = ST_CONNECTING;
+static int   s_state = ST_UPDATE_CHECK;
+static char  s_server_ip[64];
 static int   s_is_register = 0;
 static int   s_active_field = 0;
 static int   s_field_count = FIELD_COUNT_LOGIN;
@@ -151,7 +155,7 @@ static void do_submit(void) {
 
 void Auth_Init(IDirect3DDevice8* pDevice, const char* server_ip) {
     (void)pDevice;
-    s_state = ST_CONNECTING;
+    s_state = ST_UPDATE_CHECK;
     s_is_register = 0;
     s_active_field = 0;
     s_field_count = FIELD_COUNT_LOGIN;
@@ -172,8 +176,13 @@ void Auth_Init(IDirect3DDevice8* pDevice, const char* server_ip) {
         lstrcpynA(s_user, Creds_GetUsername(), sizeof(s_user));
         lstrcpynA(s_pass, Creds_GetPassword(), sizeof(s_pass));
     }
+    lstrcpynA(s_server_ip, server_ip, sizeof(s_server_ip));
     SC_Net_Init();
-    SC_Net_ConnectBegin(server_ip);
+
+    /* Check for update before starting the SCCP handshake */
+    SC_Update_Init(server_ip, "D:\\");
+    SC_Update_StartCheck();
+    s_state = ST_UPDATE_CHECK;
 }
 
 void Auth_Shutdown(void) {
@@ -212,6 +221,7 @@ void Auth_InitLogout(IDirect3DDevice8* pDevice, const char* server_ip) {
     s_state = ST_CONNECTING;   /* wait for handshake, then show login form */
 
     ScreenKB_Close();
+    SC_Update_Reset();
     HID_Init();
 }
 
@@ -265,8 +275,54 @@ int Auth_Update(WORD wPressed) {
         return AUTH_RESULT_NONE;
     }
 
+    /* Update prompt buttons -- handled before state machine */
+    if (s_state == ST_UPDATE) {
+        if (wPressed & BTN_A) {
+            if (SC_Update_IsComplete()) {
+                SC_Update_Apply();  /* does not return */
+            }
+            else {
+                SC_Update_StartDownload();
+            }
+        }
+        if (wPressed & BTN_B) {
+            /* Skip update -- connect normally */
+            SC_Net_ConnectBegin(s_server_ip);
+            s_state = ST_CONNECTING;
+        }
+    }
+
     /*    State machine    */
     switch (s_state) {
+
+        /*    UPDATE CHECK    */
+    case ST_UPDATE_CHECK:
+        SC_Update_Tick();
+        if (SC_Update_IsCheckDone()) {
+            if (SC_Update_IsAvailable()) {
+                s_state = ST_UPDATE;
+            }
+            else {
+                /* No update -- proceed with normal connect */
+                SC_Net_ConnectBegin(s_server_ip);
+                s_state = ST_CONNECTING;
+            }
+        }
+        break;
+
+        /*    UPDATE AVAILABLE / IN PROGRESS    */
+    case ST_UPDATE:
+        SC_Update_Tick();
+        if (SC_Update_IsComplete()) {
+            /* User prompted in draw -- apply on confirm */
+            break;
+        }
+        if (SC_Update_HasError()) {
+            /* Update failed -- skip and connect anyway */
+            SC_Net_ConnectBegin(s_server_ip);
+            s_state = ST_CONNECTING;
+        }
+        break;
 
         /*    CONNECTING    */
     case ST_CONNECTING:
@@ -495,7 +551,57 @@ void Auth_Draw(IDirect3DDevice8* pDevice) {
 
     switch (s_state) {
 
-        /*    CONNECTING    */
+        /*    UPDATE CHECK    */
+    case ST_UPDATE_CHECK: {
+        UI_DrawLogo(pDevice,
+            (UI_VIRT_W - LOGO_SIZE * 2.0f) * 0.5f,
+            720.0f * 0.3f,
+            LOGO_SIZE * 2.0f, LOGO_SIZE * 2.0f);
+        Font_DrawTextCentered(pDevice,
+            0, 720.0f * 0.62f, (float)UI_VIRT_W,
+            "Checking for updates...",
+            FONT_SIZE_MEDIUM, UI_COL_TEXT_SEC);
+        break;
+    }
+
+                        /*    UPDATE AVAILABLE / IN PROGRESS    */
+    case ST_UPDATE: {
+        UI_DrawLogo(pDevice,
+            (UI_VIRT_W - LOGO_SIZE * 2.0f) * 0.5f,
+            720.0f * 0.25f,
+            LOGO_SIZE * 2.0f, LOGO_SIZE * 2.0f);
+        Font_DrawTextCentered(pDevice,
+            0, 720.0f * 0.55f, (float)UI_VIRT_W,
+            SC_Update_GetStatus(),
+            FONT_SIZE_MEDIUM, UI_COL_GREEN);
+        /* Progress bar */
+        {
+            float prog = SC_Update_GetProgress();
+            if (prog > 0.0f) {
+                float bx = (UI_VIRT_W - 400.0f) * 0.5f;
+                float by = 720.0f * 0.65f;
+                UI_DrawRect(pDevice, bx, by, 400.0f, 16.0f, UI_COL_BG);
+                UI_DrawRect(pDevice, bx, by, 400.0f * prog, 16.0f, UI_COL_GREEN);
+            }
+        }
+        if (!SC_Update_IsComplete()) {
+            Font_DrawTextCentered(pDevice,
+                0, 700.0f, (float)UI_VIRT_W,
+                SC_Update_GetProgress() > 0.0f
+                ? ""
+                : "[A] Update  [B] Skip",
+                FONT_SIZE_SMALL, UI_COL_TEXT_MUTED);
+        }
+        else {
+            Font_DrawTextCentered(pDevice,
+                0, 700.0f, (float)UI_VIRT_W,
+                "[A] Relaunch",
+                FONT_SIZE_SMALL, UI_COL_TEXT_MUTED);
+        }
+        break;
+    }
+
+                  /*    CONNECTING    */
     case ST_CONNECTING: {
         int dots = (s_connect_dots / 20) % 4;
         char conn_str[32] = "Connecting";
@@ -636,6 +742,6 @@ void Auth_Draw(IDirect3DDevice8* pDevice) {
     Font_DrawTextRight(pDevice,
         (float)UI_VIRT_W - 8.0f,
         (float)UI_VIRT_H - Font_GlyphHeight(FONT_SIZE_SMALL) - 6.0f,
-        "v1.2",
+        "v1.3 - Public Beta",
         FONT_SIZE_SMALL, UI_COL_TEXT_MUTED);
 }

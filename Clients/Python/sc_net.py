@@ -40,6 +40,11 @@ SCCP_ERROR       = 0x0D
 SCCP_PING        = 0x0E
 SCCP_PONG        = 0x0F
 SCCP_DISCONNECT  = 0x10
+SCCP_DM_OPEN     = 0x14
+SCCP_MAIL_LIST   = 0x15
+SCCP_MAIL_SEND   = 0x16
+SCCP_MAIL_READ   = 0x17
+SCCP_MAIL_DELETE = 0x18
 
 CREDS_FILE    = Path(__file__).parent / 'creds.json'
 PING_INTERVAL = 10.0
@@ -162,6 +167,8 @@ class ChatWorker(QThread):
     sig_join_fail    = Signal(str)                       # reason string
     sig_error        = Signal(str)
     sig_disconnected = Signal(str)
+    sig_dm_room      = Signal(int, str)                  # room_id, display_name
+    sig_mail_list    = Signal(list)                      # list of mail dicts
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -190,6 +197,18 @@ class ChatWorker(QThread):
 
     def send_message(self, room_id: int, content: str):
         self._schedule(self._do_send_message, room_id, content)
+
+    def send_dm_open(self, target_user_id: int):
+        self._schedule(self._do_dm_open, target_user_id)
+
+    def send_mail(self, recipient_id: int, body: str):
+        self._schedule(self._do_mail_send, recipient_id, body)
+
+    def send_mail_read(self, mail_id: int):
+        self._schedule(self._do_mail_read, mail_id)
+
+    def send_mail_delete(self, mail_id: int):
+        self._schedule(self._do_mail_delete, mail_id)
 
     def send_disconnect(self):
         self._stop = True
@@ -329,6 +348,8 @@ class ChatWorker(QThread):
             self._on_user_join(payload)
         elif pkt_type == SCCP_USER_LEAVE:
             self._on_user_leave(payload)
+        elif pkt_type == SCCP_MAIL_LIST:
+            self._on_mail_list(payload)
         elif pkt_type == SCCP_PONG:
             pass
 
@@ -364,9 +385,9 @@ class ChatWorker(QThread):
     def _on_room_info(self, payload: bytes):
         self._joining_room = False
         try:
-            pos     = 0
-            room_id = payload[pos]; pos += 1
-            pos    += 1  # type
+            pos      = 0
+            room_id  = payload[pos]; pos += 1
+            room_type = payload[pos]; pos += 1
             name, pos = _unpack_string8(payload, pos)
             count  = payload[pos]; pos += 1
             history = []
@@ -376,6 +397,9 @@ class ChatWorker(QThread):
                 content,  pos = _unpack_string16(payload, pos)
                 ts,       pos = _unpack_string8(payload, pos)
                 history.append({'username': username, 'content': content, 'ts': ts, 'msg_id': msg_id})
+            if room_type == 2:
+                # DM room -- announce it so the UI can add it to the DM list
+                self.sig_dm_room.emit(room_id, name)
             self.sig_room_joined.emit(room_id, name, history)
         except Exception as e:
             self.sig_error.emit(f'ROOM_INFO parse error: {e}')
@@ -432,6 +456,21 @@ class ChatWorker(QThread):
         except Exception as e:
             self.sig_error.emit(f'USER_LEAVE parse error: {e}')
 
+    def _on_mail_list(self, payload: bytes):
+        try:
+            count = struct.unpack_from('>H', payload, 0)[0]; pos = 2
+            mails = []
+            for _ in range(count):
+                mail_id   = struct.unpack_from('>I', payload, pos)[0]; pos += 4
+                sender, pos = _unpack_string8(payload, pos)
+                body,   pos = _unpack_string16(payload, pos)
+                ts,     pos = _unpack_string8(payload, pos)
+                mails.append({'mail_id': mail_id, 'sender': sender,
+                              'body': body, 'ts': ts})
+            self.sig_mail_list.emit(mails)
+        except Exception as e:
+            self.sig_error.emit(f'MAIL_LIST parse error: {e}')
+
     # ── Send ──────────────────────────────────────────────────────────────────
 
     async def _do_login(self, username: str, password: str):
@@ -453,6 +492,22 @@ class ChatWorker(QThread):
     async def _do_send_message(self, room_id: int, content: str):
         payload = bytes([room_id]) + _pack_string16(content)
         await _write_encrypted(self._writer, self._session_key, SCCP_MESSAGE, payload)
+
+    async def _do_dm_open(self, target_user_id: int):
+        payload = struct.pack('>I', target_user_id)
+        await _write_encrypted(self._writer, self._session_key, SCCP_DM_OPEN, payload)
+
+    async def _do_mail_send(self, recipient_id: int, body: str):
+        payload = struct.pack('>I', recipient_id) + _pack_string16(body)
+        await _write_encrypted(self._writer, self._session_key, SCCP_MAIL_SEND, payload)
+
+    async def _do_mail_read(self, mail_id: int):
+        payload = struct.pack('>I', mail_id)
+        await _write_encrypted(self._writer, self._session_key, SCCP_MAIL_READ, payload)
+
+    async def _do_mail_delete(self, mail_id: int):
+        payload = struct.pack('>I', mail_id)
+        await _write_encrypted(self._writer, self._session_key, SCCP_MAIL_DELETE, payload)
 
     async def _do_disconnect(self):
         if self._writer and self._session_key:

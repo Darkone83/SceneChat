@@ -18,6 +18,9 @@ public partial class MainWindow : Window
     private int _myUserId = 0;
     private readonly Dictionary<int, Paragraph> _msgParagraphs = new();
     private readonly Dictionary<int, UserInfo> _onlineUsers = new(); // msgId -> Paragraph
+    private readonly Dictionary<int, string> _dmRooms = new(); // roomId -> displayName
+    private readonly List<MailItem> _mails = new();
+    private MailboxWindow? _mailboxWindow;
     private bool _doRegister;
     private string _pendingUser = "";
     private string _pendingPass = "";
@@ -143,7 +146,7 @@ public partial class MainWindow : Window
             {
                 var label = (r.PasswordFlag > 0 ? "* " : "") +
                             (r.Type == 1 ? "[voice] " : "# ") + r.Name;
-                RoomListBox.Items.Add(new RoomItem(r.Id, label, r.Type, r.PasswordFlag));
+                RoomListBox.Items.Add(new RoomItem(r.Id, label, r.Name, r.Type, r.PasswordFlag));
             }
             // No auto-join -- user selects from list
             RefreshUserList(); // Re-resolve room names now that rooms are loaded
@@ -189,12 +192,34 @@ public partial class MainWindow : Window
                 _onlineUsers[_myUserId] = me with { RoomId = roomId };
                 RefreshUserList();
             }
-            TxtRoomName.Text = $"# {name}";
+            // DM rooms display "@ username"; regular rooms "# name"
+            string display = name.StartsWith("DM:") ? name.Substring(3) : name;
+            bool isDm = _dmRooms.ContainsKey(roomId) || name.StartsWith("DM:");
+            TxtRoomName.Text = isDm ? $"@ {display}" : $"# {name}";
             FeedBox.Document.Blocks.Clear();
             _msgParagraphs.Clear();
             foreach (var m in history)
                 AppendMessage(m.Username, m.Content, m.Timestamp, m.MsgId);
-            SetStatus($"#{name}");
+            SetStatus(isDm ? $"@{display}" : $"#{name}");
+        });
+
+        _client.OnDmRoom += (roomId, name) => Dispatcher.Invoke(() =>
+        {
+            string uname = name.StartsWith("DM:") ? name.Substring(3) : name;
+            if (!_dmRooms.ContainsKey(roomId))
+            {
+                _dmRooms[roomId] = uname;
+                DmListBox.Items.Add(new DmItem(roomId, uname));
+            }
+        });
+
+        _client.OnMailList += mails => Dispatcher.Invoke(() =>
+        {
+            _mails.AddRange(mails);
+            if (_mails.Count > 0)
+                SetStatus($"{_mails.Count} message(s) in mailbox");
+            if (_mailboxWindow != null && _mailboxWindow.IsVisible)
+                _mailboxWindow.SetMails(_mails);
         });
 
         _client.OnMessage += msg => Dispatcher.Invoke(() =>
@@ -305,9 +330,10 @@ public partial class MainWindow : Window
             string roomName = "?";
             foreach (RoomItem ri in RoomListBox.Items)
             {
-                if (ri.Id == u.RoomId) { roomName = ri.Name; break; }
+                if (ri.Id == u.RoomId) { roomName = ri.RawName; break; }
             }
-            OnlineListBox.Items.Add($"● {u.Username}  #{roomName}");
+            OnlineListBox.Items.Add(new UserListItem(u.UserId, u.Username,
+                $"● {u.Username}  #{roomName}"));
         }
     }
 
@@ -350,13 +376,72 @@ public partial class MainWindow : Window
             if (room.PasswordFlag > 0)
             {
                 var pw = Microsoft.VisualBasic.Interaction.InputBox(
-                    $"Enter password for {room.Name}:", "Password Required", "");
+                    $"Enter password for {room.RawName}:", "Password Required", "");
                 if (!string.IsNullOrEmpty(pw))
                     _ = _client?.JoinRoomAsync(room.Id, pw);
             }
             else
                 _ = _client?.JoinRoomAsync(room.Id);
         }
+    }
+
+    // ── DMs and mailbox ───────────────────────────────────────────────────────
+
+    private void DmListBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (DmListBox.SelectedItem is DmItem dm && dm.Id != _currentRoomId)
+            _ = _client?.JoinRoomAsync(dm.Id);
+    }
+
+    private void OnlineListBox_MouseDoubleClick(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (OnlineListBox.SelectedItem is UserListItem u && u.UserId != _myUserId)
+            _ = _client?.SendDmOpenAsync(u.UserId);
+    }
+
+    private void MenuOpenDm_Click(object sender, RoutedEventArgs e)
+    {
+        if (OnlineListBox.SelectedItem is UserListItem u && u.UserId != _myUserId)
+            _ = _client?.SendDmOpenAsync(u.UserId);
+    }
+
+    private void MenuSendMail_Click(object sender, RoutedEventArgs e)
+    {
+        if (OnlineListBox.SelectedItem is UserListItem u && u.UserId != _myUserId)
+            OpenComposeMail(u.UserId, u.Username);
+    }
+
+    private void BtnMailbox_Click(object sender, RoutedEventArgs e)
+    {
+        if (_mailboxWindow == null || !_mailboxWindow.IsLoaded)
+        {
+            _mailboxWindow = new MailboxWindow { Owner = this };
+            _mailboxWindow.OnReadMail += mailId => _ = _client?.SendMailReadAsync(mailId);
+            _mailboxWindow.OnDeleteMail += mailId =>
+            {
+                _ = _client?.SendMailDeleteAsync(mailId);
+                _mails.RemoveAll(m => m.MailId == mailId);
+            };
+            _mailboxWindow.OnComposeReply += sender2 => OpenComposeMail(0, sender2);
+            _mailboxWindow.OnComposeNew += () => OpenComposeMail(0, "");
+        }
+        _mailboxWindow.SetMails(_mails);
+        _mailboxWindow.Show();
+        _mailboxWindow.Activate();
+    }
+
+    private void OpenComposeMail(int recipientId, string recipientName)
+    {
+        var dlg = new ComposeMailWindow(recipientId, recipientName) { Owner = this };
+        dlg.OnSend += (rid, rname, body) =>
+        {
+            if (rid != 0)
+                _ = _client?.SendMailAsync(rid, body);
+            else
+                _ = _client?.SendMailAsync(0, $"TO:{rname}\n{body}");
+            SetStatus($"Mail sent to {rname}");
+        };
+        dlg.Show();
     }
 
     // ── Input bar ─────────────────────────────────────────────────────────────
@@ -405,6 +490,13 @@ public partial class MainWindow : Window
         _currentRoomId = -1;
         FeedBox.Document.Blocks.Clear();
         RoomListBox.Items.Clear();
+        // Clear DM/mail state so a different account doesn't see stale data
+        DmListBox.Items.Clear();
+        _dmRooms.Clear();
+        _mails.Clear();
+        _onlineUsers.Clear();
+        OnlineListBox.Items.Clear();
+        if (_mailboxWindow != null) { _mailboxWindow.Close(); _mailboxWindow = null; }
         TxtLoginStatus.Text = "";
         BtnLogin.IsEnabled = true;
         BtnRegister.IsEnabled = true;
@@ -441,13 +533,33 @@ public partial class MainWindow : Window
 public class RoomItem
 {
     public int Id { get; }
-    public string Name { get; }
+    public string DisplayName { get; }  // Full label with prefix
+    public string RawName { get; }  // Room name only for lookups
     public int Type { get; }
     public int PasswordFlag { get; }
-    public string DisplayName => Name;
 
-    public RoomItem(int id, string name, int type, int passwordFlag = 0)
-    { Id = id; Name = name; Type = type; PasswordFlag = passwordFlag; }
+    public RoomItem(int id, string displayName, string rawName, int type, int passwordFlag = 0)
+    { Id = id; DisplayName = displayName; RawName = rawName; Type = type; PasswordFlag = passwordFlag; }
 
-    public override string ToString() => Name;
+    public override string ToString() => DisplayName;
+}
+
+public class UserListItem
+{
+    public int UserId { get; }
+    public string Username { get; }
+    public string Display { get; }
+    public UserListItem(int userId, string username, string display)
+    { UserId = userId; Username = username; Display = display; }
+    public override string ToString() => Display;
+}
+
+public class DmItem
+{
+    public int Id { get; }
+    public string DisplayName { get; }
+    public string Username { get; }
+    public DmItem(int id, string username)
+    { Id = id; Username = username; DisplayName = "@ " + username; }
+    public override string ToString() => DisplayName;
 }

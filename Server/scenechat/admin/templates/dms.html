@@ -1,0 +1,59 @@
+{% extends 'base.html' %}
+{% block content %}
+<h1 class="page-title">DM Management</h1>
+
+{% with messages = get_flashed_messages() %}
+{% if messages %}
+<div class="card" style="margin-bottom:12px;">
+    {% for m in messages %}
+    <div style="color:#39ff14; padding:4px 0;">{{ m }}</div>
+    {% endfor %}
+</div>
+{% endif %}
+{% endwith %}
+
+<div class="card" style="margin-bottom:16px; border-left:3px solid #8b5cf6;">
+    <p style="color:#aaa; font-size:0.9em; margin:0;">
+        <strong style="color:#8b5cf6;">Privacy notice:</strong>
+        Direct messages are private. This page shows DM channel
+        <em>metadata only</em> &mdash; who is talking to whom, message counts, and
+        activity times. Message <strong>content is never accessible here</strong>.
+        Use this only to remove abusive or spam DM channels.
+    </p>
+</div>
+
+<div class="card">
+    <h2 class="section-title">Direct Message Channels</h2>
+    {% if dm_rooms %}
+    <table>
+        <thead>
+            <tr>
+                <th>Participants</th>
+                <th style="text-align:center;">Messages</th>
+                <th>Last Activity</th>
+                <th>Created</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for dm in dm_rooms %}
+        <tr>
+            <td style="color:#8b5cf6; font-weight:bold;">{{ dm[1] }}</td>
+            <td style="text-align:center; color:#888;">{{ dm[2] }}</td>
+            <td style="color:#555; font-size:0.85em;">{{ dm[3] if dm[3] else '&mdash;'|safe }}</td>
+            <td style="color:#555; font-size:0.85em;">{{ dm[4] }}</td>
+            <td>
+                <form method="POST" action="{{ url_for('delete_dm', room_id=dm[0]) }}"
+                      onsubmit="return confirm('Remove this DM channel? This deletes the conversation for both users and cannot be undone.')">
+                    <button type="submit" class="btn btn-red">Remove</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p style="color:#555;">No direct message channels.</p>
+    {% endif %}
+</div>
+{% endblock %}

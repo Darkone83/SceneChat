@@ -4,8 +4,16 @@
 
 <div class="stats-grid">
     <div class="stat-card">
+        <div class="value" id="stat-online" style="color:#39ff14;">&mdash;</div>
+        <div class="label">Online Now</div>
+    </div>
+    <div class="stat-card">
         <div class="value" id="stat-users">{{ user_count }}</div>
         <div class="label">Total Users</div>
+    </div>
+    <div class="stat-card">
+        <div class="value" id="stat-new-users" style="color:#8b5cf6;">{{ new_users_24h }}</div>
+        <div class="label">New (24h)</div>
     </div>
     <div class="stat-card">
         <div class="value" id="stat-rooms">{{ room_count }}</div>
@@ -16,16 +24,41 @@
         <div class="label">Messages</div>
     </div>
     <div class="stat-card">
+        <div class="value" id="stat-dms" style="color:#8b5cf6;">{{ dm_count }}</div>
+        <div class="label">DM Channels</div>
+    </div>
+    <div class="stat-card">
         <div class="value" id="stat-banned" style="color:#ef4444;">{{ banned_count }}</div>
         <div class="label">Banned Users</div>
     </div>
 </div>
 
+<div class="card" style="margin-bottom:16px;">
+    <h2 class="section-title">Server Status</h2>
+    <div style="display:flex; gap:24px; align-items:center; flex-wrap:wrap;">
+        <div style="display:flex; align-items:center; gap:8px;">
+            <span id="chat-dot" style="width:10px; height:10px; border-radius:50%; background:#555; display:inline-block;"></span>
+            <span style="color:#aaa; font-size:0.9em;">Chat server &mdash; port 8943</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px;">
+            <span style="width:10px; height:10px; border-radius:50%; background:#39ff14; display:inline-block;"></span>
+            <span style="color:#aaa; font-size:0.9em;">Admin portal &mdash; port 8950</span>
+        </div>
+        <span id="refresh-indicator" style="color:#555; font-size:0.8em; margin-left:auto;"></span>
+    </div>
+</div>
+
 <div class="card">
-    <h2 style="color:#39ff14; margin-bottom:16px; font-size:1em; text-transform:uppercase; letter-spacing:1px;">Server Status</h2>
-    <div style="display:flex; gap:32px; align-items:center; flex-wrap:wrap;">
-        <p style="color:#888; font-size:0.9em;">Chat server port 8943 &mdash; Admin portal port 8950</p>
-        <span id="refresh-indicator" style="color:#555; font-size:0.8em;"></span>
+    <h2 class="section-title">Quick Actions</h2>
+    <div style="display:flex; gap:10px; flex-wrap:wrap;">
+        <a href="{{ url_for('monitor') }}" class="btn btn-green">Live Monitor</a>
+        <a href="{{ url_for('online_users') }}" class="btn">Online Users</a>
+        <a href="{{ url_for('users') }}" class="btn">Manage Users</a>
+        {% if session.role in ('superadmin', 'admin') %}
+        <a href="{{ url_for('rooms') }}" class="btn">Rooms</a>
+        <a href="{{ url_for('dms') }}" class="btn">DM Management</a>
+        {% endif %}
+        <a href="{{ url_for('logs') }}" class="btn">Logs</a>
     </div>
 </div>
 
@@ -34,15 +67,38 @@
         try {
             const res  = await fetch('/api/dashboard_stats');
             const data = await res.json();
-            document.getElementById('stat-users').textContent    = data.user_count;
-            document.getElementById('stat-rooms').textContent    = data.room_count;
-            document.getElementById('stat-messages').textContent = data.message_count;
-            document.getElementById('stat-banned').textContent   = data.banned_count;
+            document.getElementById('stat-users').textContent     = data.user_count;
+            document.getElementById('stat-new-users').textContent = data.new_users_24h;
+            document.getElementById('stat-rooms').textContent     = data.room_count;
+            document.getElementById('stat-messages').textContent  = data.message_count;
+            document.getElementById('stat-dms').textContent       = data.dm_count;
+            document.getElementById('stat-banned').textContent    = data.banned_count;
             const now = new Date();
             document.getElementById('refresh-indicator').textContent =
                 `Last updated: ${now.toLocaleTimeString()}`;
         } catch(e) {}
     }
+    async function refreshOnline() {
+        const dot = document.getElementById('chat-dot');
+        try {
+            const res  = await fetch('/api/online');
+            const data = await res.json();
+            if (data.error) {
+                document.getElementById('stat-online').textContent = '0';
+                dot.style.background = '#ef4444';
+            } else {
+                const count = (data.users || []).length;
+                document.getElementById('stat-online').textContent = count;
+                dot.style.background = '#39ff14';
+            }
+        } catch(e) {
+            document.getElementById('stat-online').textContent = '0';
+            dot.style.background = '#ef4444';
+        }
+    }
+    refreshStats();
+    refreshOnline();
     setInterval(refreshStats, 5000);
+    setInterval(refreshOnline, 5000);
 </script>
 {% endblock %}
